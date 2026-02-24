@@ -51,7 +51,6 @@ VALID_FACTIONS = ["魏", "蜀", "吳", "其他"]
 # ==========================================
 # 🎨 動態頭像映射表 (Avatar Mapping)
 # ==========================================
-# 定義每個 AI 性格在不同名次下對應的圖片檔名
 AVATAR_FILES = {
     "【神算子】": {
         1: "avatars/strategist_1.png", 2: "avatars/strategist_2.png",
@@ -396,9 +395,12 @@ def render_room():
         
         for p, r in sorted(room["results"].items(), key=lambda x: x[1]['rank']):
             bg_color = "🟢" if p == pid else "⚪"
-            st.write(f"#### {bg_color} 第 {r['rank']} 名: {r['faction']}陣營 (+{r['pts']}分)")
             
-            # 🎨 新增：動態頭像與垃圾話 UI 整合
+            # ✨ 核心更動：將顯示名稱替換為主公名號或 AI 性格
+            display_name = f"{r['personality']} ({r['faction']})" if r["is_ai"] else f"主公 {p} ({r['faction']})"
+            
+            st.write(f"#### {bg_color} 第 {r['rank']} 名: {display_name} (+{r['pts']}分)")
+            
             if r["is_ai"]:
                 pers = r['personality']
                 rank_num = r['rank']
@@ -407,7 +409,6 @@ def render_room():
                 with st.container():
                     col_img, col_txt = st.columns([1, 6])
                     with col_img:
-                        # 若您已切好圖片放入資料夾，就會顯示；否則安全降級顯示文字
                         if os.path.exists(avatar_file):
                             st.image(avatar_file, use_container_width=True)
                         else:
@@ -423,9 +424,20 @@ def render_room():
         score_data = []
         for rank, (player_key, score) in enumerate(current_scores):
             faction = room["players"].get(player_key, player_key.replace("AI_", ""))
+            is_ai = player_key.startswith("AI_")
+            
+            # ✨ 核心更動：排行榜的名稱顯示也同步更新
+            if is_ai:
+                pers = room["ai_personalities"].get(player_key, "")
+                display_name = f"{pers} ({faction})"
+            else:
+                display_name = f"主公 {player_key} ({faction})"
+                
             medal = "🥇" if rank == 0 else "🥈" if rank == 1 else "🥉" if rank == 2 else "🎖️"
             is_me = (player_key == pid)
-            score_data.append({"排名": f"{medal} 第 {rank + 1} 名", "陣營": f"{faction}陣營" + (" 🟢(你)" if is_me else ""), "總分": int(score)})
+            marker = " 🟢(你)" if is_me else ""
+            score_data.append({"排名": f"{medal} 第 {rank + 1} 名", "名號 (陣營)": f"{display_name}{marker}", "總分": int(score)})
+            
         st.dataframe(pd.DataFrame(score_data), hide_index=True, use_container_width=True)
         st.divider()
 
@@ -436,8 +448,18 @@ def render_room():
         st.balloons(); st.header("🏆 戰局結束！天下大勢底定")
         for i, (p, s) in enumerate(sorted(room["scores"].items(), key=lambda x: x[1], reverse=True)):
             faction = room['players'].get(p, p.replace("AI_", ""))
+            is_ai = p.startswith("AI_")
+            
+            # ✨ 核心更動：最終結算畫面也同步更新
+            if is_ai:
+                pers = room["ai_personalities"].get(p, "")
+                display_name = f"{pers} ({faction})"
+            else:
+                display_name = f"主公 {p} ({faction})"
+                
             medal = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else "🎖️"
-            st.subheader(f"{medal} {faction}陣營：{s} 分")
+            st.subheader(f"{medal} {display_name}：{s} 分")
+            
         if st.button("🚪 離開房間並返回大廳"): st.session_state.current_room = None; st.rerun()
 
 if st.session_state.current_room: render_room()
