@@ -15,7 +15,6 @@ from google import genai
 # ==========================================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [SECURE_LOG] - %(message)s')
 
-# 安全載入 API Key (支援環境變數或 Streamlit Secrets)
 API_KEY = os.getenv("GEMINI_API_KEY")
 if not API_KEY:
     try:
@@ -23,35 +22,31 @@ if not API_KEY:
     except Exception:
         API_KEY = None
 
-# 初始化全新的 google-genai 終端 (Client)
 if API_KEY:
     ai_client = genai.Client(api_key=API_KEY)
 else:
     ai_client = None
     logging.warning("未偵測到 GEMINI_API_KEY，AI 將採用預設隨機決策。")
 
-# 個人狀態隔離 (Session State)
 if 'current_room' not in st.session_state:
     st.session_state.current_room = None
 if 'player_id' not in st.session_state:
     st.session_state.player_id = None
 
-# 伺服器全域記憶體 (Global State)
 @st.cache_resource
 def get_global_rooms():
     return {}
 
 GLOBAL_ROOMS = get_global_rooms()
-
 VALID_FACTIONS = ["魏", "蜀", "吳", "其他"]
 
 # ==========================================
 # 🗄️ 靜態遊戲資料與 AI 性格設定
 # ==========================================
 AI_PERSONALITIES = {
-    "【神算子】": "優雅、從容、預判。說話語氣需展現高度智慧，對玩家保持禮貌但自信。請根據你手上的武將，挑選數值最平均、總和較高的3人。",
-    "【霸道梟雄】": "狂傲、霸氣、壓制。說話語氣需狂妄、具備壓迫感，偶爾帶點挑釁，展現征服欲。請優先挑選你手上武力或統帥極高的3人。",
-    "【守護之盾】": "謙遜、堅毅、溫厚。說話語氣需充滿正氣與堅韌感，對玩家表達敬意，強調防守與希望。請優先挑選政治、魅力或運氣較高的3人。"
+    "【神算子】": "優雅、從容、預判。對玩家保持禮貌但極度自信。",
+    "【霸道梟雄】": "狂傲、霸氣、壓制。充滿壓迫感與征服欲。",
+    "【守護之盾】": "謙遜、堅毅、溫厚。充滿正氣，強調防守與堅守底線。"
 }
 
 FACTION_ROSTERS = {
@@ -127,71 +122,80 @@ GENERALS_STATS = {
 def get_general_stats(name: str):
     return GENERALS_STATS.get(name, {"武力": 50, "智力": 50, "統帥": 50, "政治": 50, "魅力": 50, "運氣": 50})
 
-# ==========================================
-# 📡 系統偵錯：API 連線測試 (次世代 SDK 寫法)
-# ==========================================
 def check_api_status():
-    if not ai_client:
-        return False, "API 金鑰未設定 (API_KEY is missing or undefined)。請檢查 Secrets 設定。"
+    if not ai_client: return False, "API 金鑰未設定。"
     try:
         response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents="這是一個連線測試，請直接回覆『OK』。"
+            model='gemini-2.5-flash', contents="連線測試，回覆OK。"
         )
-        if response.text:
-            return True, f"連線成功！Gemini API 回應正常。(回應內容: {response.text.strip()})"
-    except Exception as e:
-        return False, f"連線失敗，錯誤代碼或原因：{str(e)}"
+        return True, f"連線成功！({response.text.strip()})"
+    except Exception as e: return False, f"連線失敗：{str(e)}"
 
 # ==========================================
-# 🧠 AI 決策引擎 (次世代 SDK 整合)
+# 🧠 AI 決策引擎 (支援情緒化名次感知)
 # ==========================================
 def get_ai_decision(ai_id: str, available_cards: list, round_num: int, personality_name: str) -> tuple:
     fallback_cards = random.sample(available_cards, 3)
-    fallback_quote = f"吾乃{personality_name}，且看我這回合的排兵布陣！"
+    # 若 API 失敗，使用這些防呆對話庫
+    fallback_quotes = {
+        "1": f"吾乃{personality_name}，這天下終究是我的！",
+        "2": "大意了！下次定叫爾等灰飛煙滅！",
+        "3": "這局勢...看來需要重新佈陣了。",
+        "4": "天亡我也！竟落得如此下場..."
+    }
 
-    if not ai_client:
-        return fallback_cards, fallback_quote
+    if not ai_client: return fallback_cards, fallback_quotes
 
     personality_desc = AI_PERSONALITIES.get(personality_name, "")
+    
+    # 🎯 核心改動：要求 AI 一次產生 4 個名次的預備台詞
     prompt = f"""
     你是一個三國卡牌對戰遊戲的AI玩家。
     你的性格設定是：{personality_name} - {personality_desc}
     目前是遊戲的第 {round_num}/5 回合。
-    你目前手上剩餘可用的武將牌庫為（共{len(available_cards)}名）：{available_cards}。
+    你目前手上剩餘可用的武將牌庫為：{available_cards}。
     
     任務：
-    1. 從上述牌庫中，挑選出「剛好 3 名」武將出戰。
-    2. 根據你的性格，說出一句出牌時的霸氣台詞或謀略之語（限 30 字以內）。
+    1. 從牌庫中挑選「剛好 3 名」武將出戰。
+    2. 根據你的性格，預先準備好四種不同戰局名次(1~4名)的台詞（每句限 30 字以內）：
+       - "1": 獲得第 1 名時（極度囂張、狂妄、掌控全局）
+       - "2": 獲得第 2 名時（不甘心、認為大意了、放話下次贏）
+       - "3": 獲得第 3 名時（語氣轉弱、自我懷疑、或是找藉口）
+       - "4": 獲得第 4 名墊底時（垂頭喪氣、徹底認輸、或是崩潰）
     
-    警告：你必須嚴格以純 JSON 格式回傳，不可包含 Markdown 標記 (如 ```json)，格式必須完全一致：
-    {{"selected_cards": ["武將A", "武將B", "武將C"], "quote": "你的台詞"}}
+    警告：嚴格以純 JSON 格式回傳，格式必須完全一致：
+    {{
+      "selected_cards": ["武將A", "武將B", "武將C"],
+      "quotes": {{
+        "1": "第一名台詞",
+        "2": "第二名台詞",
+        "3": "第三名台詞",
+        "4": "第四名台詞"
+      }}
+    }}
     """
 
     try:
-        response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt
-        )
+        response = ai_client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
         raw_text = response.text.strip()
         if raw_text.startswith("```json"): raw_text = raw_text[7:-3].strip()
         elif raw_text.startswith("```"): raw_text = raw_text[3:-3].strip()
 
         data = json.loads(raw_text)
         selected = data.get("selected_cards", [])
-        quote = data.get("quote", fallback_quote)
+        quotes = data.get("quotes", fallback_quotes)
 
         if len(selected) == 3 and all(card in available_cards for card in selected):
-            return selected, quote
+            return selected, quotes
         else:
-            logging.warning(f"[Security/Logic] AI {ai_id} 選牌無效: {selected}。觸發回退機制。")
-            return fallback_cards, fallback_quote + "（哼，看我隨機應變！）"
+            logging.warning(f"AI 選牌無效，觸發回退。")
+            return fallback_cards, fallback_quotes
     except Exception as e:
-        logging.error(f"[System] AI {ai_id} API 呼叫失敗: {e}。觸發回退機制。")
-        return fallback_cards, fallback_quote + "（訊號干擾，但我等絕不退縮！）"
+        logging.error(f"AI API 失敗: {e}。觸發回退。")
+        return fallback_cards, fallback_quotes
 
 # ==========================================
-# ⚙️ 核心系統功能 (大廳、房間、戰鬥)
+# ⚙️ 核心系統功能
 # ==========================================
 def validate_id(raw_id: str) -> str:
     if not raw_id: return ""
@@ -203,7 +207,7 @@ def init_room(code: str):
         GLOBAL_ROOMS[code] = {
             "players": {}, "ai_factions": [], "status": "lobby", "round": 1,
             "decks": {}, "locked_cards": {}, "scores": {}, "last_attr": "", "results": {},
-            "ai_personalities": {}, "ai_quotes": {}
+            "ai_personalities": {}, "ai_quotes": {} 
         }
 
 def assign_faction(code: str, pid: str, faction: str):
@@ -215,26 +219,36 @@ def start_game(code: str):
     room = GLOBAL_ROOMS.get(code)
     taken = list(room["players"].values())
     room["ai_factions"] = [f for f in VALID_FACTIONS if f not in taken]
+    
     for pid, f in room["players"].items():
         room["decks"][pid], room["scores"][pid] = list(FACTION_ROSTERS[f]), 0
+        
+    # 🎯 核心改動：打亂性格清單並抽出，確保絕對不重複
     available_personalities = list(AI_PERSONALITIES.keys())
+    random.shuffle(available_personalities)
+    
     for af in room["ai_factions"]:
         ai_id = f"AI_{af}"
         room["decks"][ai_id], room["scores"][ai_id] = list(FACTION_ROSTERS[af]), 0
-        room["ai_personalities"][ai_id] = random.choice(available_personalities)
+        # 安全抽取，若意外見底則使用神算子
+        room["ai_personalities"][ai_id] = available_personalities.pop() if available_personalities else "【神算子】"
+        
     room["status"] = "playing"
 
 def lock_cards(code: str, pid: str, cards: list):
     room = GLOBAL_ROOMS.get(code)
     room["locked_cards"][pid] = cards
+    
     for af in room["ai_factions"]:
         ai_id = f"AI_{af}"
         if ai_id not in room["locked_cards"]:
             ai_deck = room["decks"][ai_id]
             personality = room["ai_personalities"][ai_id]
-            sel_cards, quote = get_ai_decision(ai_id, ai_deck, room["round"], personality)
+            # 取得 3 張牌與包含 4 個名次的台詞字典
+            sel_cards, quotes_dict = get_ai_decision(ai_id, ai_deck, room["round"], personality)
             room["locked_cards"][ai_id] = sel_cards
-            room["ai_quotes"][ai_id] = quote
+            room["ai_quotes"][ai_id] = quotes_dict
+            
     if len(room["locked_cards"]) == 4: 
         room["status"] = "resolution_pending"
 
@@ -247,15 +261,26 @@ def resolve_round(code: str):
     ranks, cur_r = {}, 0
     for i, (pid, tot) in enumerate(sorted_p):
         if i > 0 and tot < sorted_p[i-1][1]: cur_r = i
+        rank_num = cur_r + 1
         pts = {0:5, 1:3, 2:2, 3:1}.get(cur_r, 0)
         room["scores"][pid] += pts
         room["decks"][pid] = [c for c in room["decks"][pid] if c not in room["locked_cards"][pid]]
+        
         faction_name = room["players"].get(pid, pid.replace("AI_",""))
+        is_ai = pid.startswith("AI_")
+        
+        # 🎯 核心改動：根據伺服器算出的真實名次 (rank_num)，提取對應的台詞
+        final_quote = ""
+        if is_ai:
+            ai_quotes_dict = room["ai_quotes"].get(pid, {})
+            # 若字典中找不到對應名次，給予預設台詞防呆
+            final_quote = ai_quotes_dict.get(str(rank_num), "局勢變幻莫測啊...")
+            
         ranks[pid] = {
             "faction": faction_name, "cards": room["locked_cards"][pid], 
-            "total": tot, "pts": pts, "rank": cur_r+1, "is_ai": pid.startswith("AI_"),
+            "total": tot, "pts": pts, "rank": rank_num, "is_ai": is_ai,
             "personality": room["ai_personalities"].get(pid, ""),
-            "quote": room["ai_quotes"].get(pid, "")
+            "quote": final_quote
         }
     room.update({"last_attr": attr, "results": ranks, "status": "resolution_result"})
 
@@ -263,16 +288,13 @@ def next_round_or_finish(code: str):
     room = GLOBAL_ROOMS.get(code)
     room["locked_cards"], room["ai_quotes"] = {}, {}
     if room["round"] >= 5: room["status"] = "finished"
-    else:
-        room["round"] += 1
-        room["status"] = "playing"
+    else: room["round"] += 1; room["status"] = "playing"
 
 # ==========================================
 # 🖥️ Streamlit 渲染視圖
 # ==========================================
 def render_lobby():
     st.title("⚔️ 三國之巔：大廳")
-    
     pid_input = st.text_input("👤 主公名號：", key="pid_in")
     col1, col2 = st.columns(2)
     with col1:
@@ -282,7 +304,6 @@ def render_lobby():
                 code = secrets.token_hex(3).upper()
                 init_room(code); st.session_state.current_room = code; st.rerun()
             except ValueError as e: st.error(e)
-            
     st.divider()
     st.subheader("🟢 公開招募板")
     rooms = {c: d for c, d in GLOBAL_ROOMS.items() if d["status"] == "lobby"}
@@ -293,24 +314,17 @@ def render_lobby():
                 st.session_state.player_id = validate_id(pid_input)
                 st.session_state.current_room = c; d["players"][st.session_state.player_id] = ""; st.rerun()
             except ValueError as e: st.error(e)
-            
     st.divider()
-    # 📡 API 連線狀態診斷區塊
     with st.expander("📡 系統與 API 連線診斷 (開發者工具)"):
-        st.write("點擊下方按鈕測試 Gemini API 是否能正常通訊。如果對戰中出現「訊號干擾」，可在此確認連線狀態。")
         if st.button("🔌 測試 API 連線狀態", type="secondary"):
             with st.spinner("正在呼叫 Gemini 2.5 API..."):
                 is_ok, msg = check_api_status()
-                if is_ok:
-                    st.success(msg)
-                else:
-                    st.error(msg)
-                    st.info("💡 提示：請檢查 Streamlit Cloud 的 Advanced Settings -> Secrets 是否正確設定了 `GEMINI_API_KEY`。")
+                if is_ok: st.success(msg)
+                else: st.error(msg)
 
 def render_room():
     code, pid = st.session_state.current_room, st.session_state.player_id
     room = GLOBAL_ROOMS.get(code)
-    
     if not room:
         st.error("房間狀態異常，請重新加入。"); st.session_state.current_room = None; st.rerun()
         return
@@ -340,20 +354,16 @@ def render_room():
                 selected_names = df.iloc[sel_idx]["名"].tolist()
                 st.success(f"⚔️ 已選定出戰：{', '.join(selected_names)}")
                 if st.button("🔐 鎖定出戰 (AI 將同步進行決策)", type="primary"):
-                    with st.spinner("傳令兵正在通知其他陣營..."):
-                        lock_cards(code, pid, selected_names)
+                    with st.spinner("傳令兵正在通知其他陣營..."): lock_cards(code, pid, selected_names)
                     st.rerun()
-            elif len(sel_idx) > 3: 
-                st.error(f"⚠️ 只能選擇 3 名武將！您目前選擇了 {len(sel_idx)} 名。")
-            else: 
-                st.warning(f"請在上方表格精確勾選 3 位武將 (目前 {len(sel_idx)}/3)")
+            elif len(sel_idx) > 3: st.error(f"⚠️ 只能選擇 3 名武將！您目前選擇了 {len(sel_idx)} 名。")
+            else: st.warning(f"請在上方表格精確勾選 3 位武將 (目前 {len(sel_idx)}/3)")
 
     elif room["status"] == "resolution_pending":
         if st.button("🎲 擲骰子結算", type="primary"): resolve_round(code); st.rerun()
 
     elif room["status"] == "resolution_result":
         st.header(f"🎲 比拼屬性：【{room['last_attr']}】")
-        
         st.subheader("📌 本回合戰果與謀士語錄")
         for p, r in sorted(room["results"].items(), key=lambda x: x[1]['rank']):
             bg_color = "🟢" if p == pid else "⚪"
@@ -369,9 +379,7 @@ def render_room():
             faction = room["players"].get(player_key, player_key.replace("AI_", ""))
             medal = "🥇" if rank == 0 else "🥈" if rank == 1 else "🥉" if rank == 2 else "🎖️"
             is_me = (player_key == pid)
-            marker = "🟢 (你)" if is_me else ""
-            score_data.append({"排名": f"{medal} 第 {rank + 1} 名", "陣營": f"{faction}陣營 {marker}", "總分": int(score)})
-            
+            score_data.append({"排名": f"{medal} 第 {rank + 1} 名", "陣營": f"{faction}陣營" + (" 🟢(你)" if is_me else ""), "總分": int(score)})
         st.dataframe(pd.DataFrame(score_data), hide_index=True, use_container_width=True)
         st.divider()
 
@@ -386,6 +394,5 @@ def render_room():
             st.subheader(f"{medal} {faction}陣營：{s} 分")
         if st.button("🚪 離開房間並返回大廳"): st.session_state.current_room = None; st.rerun()
 
-# 路由
 if st.session_state.current_room: render_room()
 else: render_lobby()
