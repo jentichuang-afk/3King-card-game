@@ -89,18 +89,19 @@ def call_ai_with_fallback(prompt: str) -> tuple:
     # 🛡️ 第二防線：Groq (極速開源陣列 Llama 3)
     if groq_client:
         try:
-            logging.info("[AI Routing] Gemini 耗盡，喚醒 Groq (Llama-3) 極速援軍...")
+            logging.info("[AI Routing] Gemini 耗盡，喚醒 Groq 極速援軍...")
             response = groq_client.chat.completions.create(
-                model="llama3-70b-8192", 
+                # ✨ 核心修復：更新為 Groq 目前支援的最新世代 Llama 模型
+                model="llama-3.3-70b-versatile", 
                 messages=[
                     {"role": "system", "content": "你是一個嚴格輸出純JSON格式的三國遊戲對話生成引擎。"},
                     {"role": "user", "content": prompt}
                 ],
-                response_format={"type": "json_object"} # 強制 Groq 輸出 JSON
+                response_format={"type": "json_object"} 
             )
             if response.choices and response.choices[0].message.content:
-                logging.info("[AI Routing] 成功使用 Groq Llama-3！")
-                return response.choices[0].message.content, "Groq Llama3-70B"
+                logging.info("[AI Routing] 成功使用 Groq Llama 3.3！")
+                return response.choices[0].message.content, "Groq Llama-3.3-70B"
         except Exception as e:
             logging.warning(f"[AI Routing] Groq 亦宣告失敗: {e}")
             last_error = e
@@ -115,7 +116,7 @@ def call_ai_with_fallback(prompt: str) -> tuple:
                     {"role": "system", "content": "你是一個嚴格輸出純JSON格式的三國遊戲對話生成引擎。"},
                     {"role": "user", "content": prompt}
                 ],
-                response_format={"type": "json_object"} # 強制 Grok 輸出 JSON
+                response_format={"type": "json_object"} 
             )
             if response.choices and response.choices[0].message.content:
                 logging.info("[AI Routing] 成功使用 xAI Grok！")
