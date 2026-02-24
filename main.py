@@ -207,30 +207,66 @@ def render_room():
         else:
             deck = room["decks"][pid]
             df = pd.DataFrame([{"名": n, **get_general_stats(n)} for n in deck])
-            event = st.dataframe(df, on_select="rerun", selection_mode="multi-row", hide_index=True)
+            st.write("📊 **軍情處：請直接勾選下方表格，點選 3 名出戰武將**")
+            event = st.dataframe(df, on_select="rerun", selection_mode="multi-row", hide_index=True, use_container_width=True)
             sel_idx = event.selection.rows
+            
             if len(sel_idx) == 3:
+                selected_names = df.iloc[sel_idx]["名"].tolist()
+                st.success(f"⚔️ 已選定出戰：{', '.join(selected_names)}")
                 if st.button("🔐 鎖定出戰", type="primary"):
-                    lock_cards(code, pid, df.iloc[sel_idx]["名"].tolist()); st.rerun()
-            else: st.warning("請在表格中勾選 3 位武將")
+                    lock_cards(code, pid, selected_names); st.rerun()
+            elif len(sel_idx) > 3: 
+                st.error(f"⚠️ 只能選擇 3 名武將！您目前選擇了 {len(sel_idx)} 名。")
+            else: 
+                st.warning(f"請在上方表格精確勾選 3 位武將 (目前 {len(sel_idx)}/3)")
 
     elif room["status"] == "resolution_pending":
         if st.button("🎲 擲骰子結算", type="primary"): resolve_round(code); st.rerun()
 
+    # --- 🛡️ 修復：戰報揭曉與累積總分榜 ---
     elif room["status"] == "resolution_result":
-        st.header(f"🎲 比拼屬性：{room['last_attr']}")
+        st.header(f"🎲 比拼屬性：【{room['last_attr']}】")
+        
+        # 區塊 1：本回合戰情報導
+        st.subheader("📌 本回合戰果")
         for p, r in sorted(room["results"].items(), key=lambda x: x[1]['rank']):
-            st.write(f"第 {r['rank']} 名: {r['faction']} (+{r['pts']}分) | {', '.join(r['cards'])} (總和 {r['total']})")
-        if st.button("⏭️ 下一回合"):
+            bg_color = "🟢" if p == pid else "⚪"
+            st.write(f"#### {bg_color} 第 {r['rank']} 名: {r['faction']}陣營 (+{r['pts']}分)")
+            st.write(f"出戰武將：{', '.join(r['cards'])} ➔ **總和 {r['total']}**")
+            st.divider()
+
+        # 區塊 2：安全從伺服器記憶體抓取的累積總分排名
+        st.subheader("📊 目前累積總分排名")
+        current_scores = sorted(room["scores"].items(), key=lambda x: x[1], reverse=True)
+        
+        score_data = []
+        for rank, (player_key, score) in enumerate(current_scores):
+            faction = room["players"].get(player_key, player_key.replace("AI_", ""))
+            medal = "🥇" if rank == 0 else "🥈" if rank == 1 else "🥉" if rank == 2 else "🎖️"
+            is_me = (player_key == pid)
+            marker = "🟢 (你)" if is_me else ""
+            score_data.append({
+                "排名": f"{medal} 第 {rank + 1} 名",
+                "陣營": f"{faction}陣營 {marker}",
+                "總分": int(score) 
+            })
+            
+        st.dataframe(pd.DataFrame(score_data), hide_index=True, use_container_width=True)
+        st.divider()
+
+        if st.button("⏭️ 下一回合", use_container_width=True, type="primary"):
             room.update({"locked_cards": {}, "status": "playing", "round": room["round"]+1})
             if room["round"] > 5: room["status"] = "finished"
             st.rerun()
 
     elif room["status"] == "finished":
-        st.balloons(); st.header("🏆 最終排行")
+        st.balloons(); st.header("🏆 戰局結束！天下大勢底定")
         for i, (p, s) in enumerate(sorted(room["scores"].items(), key=lambda x: x[1], reverse=True)):
-            st.write(f"第 {i+1} 名: {room['players'].get(p, p)} - {s} 分")
-        if st.button("🚪 離開"): st.session_state.current_room = None; st.rerun()
+            faction = room['players'].get(p, p.replace("AI_", ""))
+            medal = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else "🎖️"
+            st.subheader(f"{medal} {faction}陣營：{s} 分")
+        if st.button("🚪 離開房間並返回大廳"): st.session_state.current_room = None; st.rerun()
 
 # 路由
 if st.session_state.current_room: render_room()
