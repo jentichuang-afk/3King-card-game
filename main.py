@@ -7,7 +7,7 @@ import pandas as pd
 import random
 import json
 import os
-# 🚀 引入 Google 與 OpenAI(Grok) SDK
+# 🚀 引入 Google 與 OpenAI(相容 Grok/Groq) SDK
 from google import genai
 from openai import OpenAI
 
@@ -16,22 +16,29 @@ from openai import OpenAI
 # ==========================================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [SECURE_LOG] - %(message)s')
 
-# 安全載入 API Keys
+# 安全載入 三大 API Keys
 try:
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY")
+    GROQ_API_KEY = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY")
     GROK_API_KEY = os.getenv("GROK_API_KEY") or st.secrets.get("GROK_API_KEY")
 except Exception:
-    GEMINI_API_KEY = None
-    GROK_API_KEY = None
+    GEMINI_API_KEY, GROQ_API_KEY, GROK_API_KEY = None, None, None
 
-# 初始化 Google GenAI Client
-if GEMINI_API_KEY:
-    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+# 1️⃣ 初始化 Google GenAI Client
+gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+if not gemini_client: logging.warning("未偵測到 GEMINI_API_KEY。")
+
+# 2️⃣ 初始化 Groq Client (使用 OpenAI 相容模式，指定 Groq 端點)
+if GROQ_API_KEY:
+    groq_client = OpenAI(
+        api_key=GROQ_API_KEY,
+        base_url="https://api.groq.com/openai/v1"
+    )
 else:
-    gemini_client = None
-    logging.warning("未偵測到 GEMINI_API_KEY。")
+    groq_client = None
+    logging.warning("未偵測到 GROQ_API_KEY。")
 
-# 初始化 Grok Client (使用 OpenAI 相容模式)
+# 3️⃣ 初始化 Grok Client (使用 OpenAI 相容模式，指定 xAI 端點)
 if GROK_API_KEY:
     grok_client = OpenAI(
         api_key=GROK_API_KEY,
@@ -54,7 +61,7 @@ GLOBAL_ROOMS = get_global_rooms()
 VALID_FACTIONS = ["魏", "蜀", "吳", "其他"]
 
 # ==========================================
-# 🤖 雙引擎動態模型備援機制 (Gemini -> Grok)
+# 🤖 跨三雲端動態模型備援機制 (Gemini -> Groq -> Grok)
 # ==========================================
 GEMINI_MODELS = [
     "gemini-3.0-flash",       
@@ -63,42 +70,61 @@ GEMINI_MODELS = [
 ]
 
 def call_ai_with_fallback(prompt: str) -> tuple:
-    """終極跨雲端調度：先嘗試 Gemini 家族，若全數耗盡則呼叫 Grok"""
+    """終極跨雲端調度：Gemini 首發 -> Groq 極速備援 -> Grok 終極底牌"""
     last_error = None
     
-    # 第一防線：Google Gemini 家族
+    # 🛡️ 第一防線：Google Gemini 家族
     if gemini_client:
         for model_name in GEMINI_MODELS:
             try:
                 response = gemini_client.models.generate_content(model=model_name, contents=prompt)
                 if response.text: 
-                    logging.info(f"[AI Routing] 成功使用 Gemini 模型: {model_name}")
+                    logging.info(f"[AI Routing] 成功使用 Gemini: {model_name}")
                     return response.text, f"Google {model_name}"
             except Exception as e:
-                logging.warning(f"[AI Routing] Gemini {model_name} 失敗 ({e})，嘗試下一個...")
+                logging.warning(f"[AI Routing] Gemini {model_name} 失敗 ({e})，切換下一模型...")
                 last_error = e
                 continue 
 
-    # 第二防線：xAI Grok
-    if grok_client:
+    # 🛡️ 第二防線：Groq (極速開源陣列 Llama 3)
+    if groq_client:
         try:
-            logging.info("[AI Routing] Gemini 配額耗盡，正在喚醒 Grok 援軍...")
-            response = grok_client.chat.completions.create(
-                model="grok-2-latest", # xAI 目前最新的模型
+            logging.info("[AI Routing] Gemini 耗盡，喚醒 Groq (Llama-3) 極速援軍...")
+            response = groq_client.chat.completions.create(
+                model="llama3-70b-8192", 
                 messages=[
-                    {"role": "system", "content": "你是一個輸出純JSON格式的遊戲對話生成引擎。"},
+                    {"role": "system", "content": "你是一個嚴格輸出純JSON格式的三國遊戲對話生成引擎。"},
                     {"role": "user", "content": prompt}
-                ]
+                ],
+                response_format={"type": "json_object"} # 強制 Groq 輸出 JSON
             )
             if response.choices and response.choices[0].message.content:
-                result_text = response.choices[0].message.content
-                logging.info("[AI Routing] 成功使用 Grok 模型！")
-                return result_text, "xAI Grok-2"
+                logging.info("[AI Routing] 成功使用 Groq Llama-3！")
+                return response.choices[0].message.content, "Groq Llama3-70B"
         except Exception as e:
-            logging.error(f"[AI Routing] Grok 也宣告失敗: {e}")
+            logging.warning(f"[AI Routing] Groq 亦宣告失敗: {e}")
             last_error = e
 
-    raise RuntimeError(f"所有 AI 援軍皆耗盡！最後錯誤: {last_error}")
+    # 🛡️ 第三防線：xAI Grok
+    if grok_client:
+        try:
+            logging.info("[AI Routing] Groq 耗盡，喚醒 Grok 終極底牌...")
+            response = grok_client.chat.completions.create(
+                model="grok-2-latest",
+                messages=[
+                    {"role": "system", "content": "你是一個嚴格輸出純JSON格式的三國遊戲對話生成引擎。"},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format={"type": "json_object"} # 強制 Grok 輸出 JSON
+            )
+            if response.choices and response.choices[0].message.content:
+                logging.info("[AI Routing] 成功使用 xAI Grok！")
+                return response.choices[0].message.content, "xAI Grok-2"
+        except Exception as e:
+            logging.error(f"[AI Routing] Grok 最終防線崩潰: {e}")
+            last_error = e
+
+    raise RuntimeError(f"所有三雲端 AI 援軍皆已陣亡！最後錯誤: {last_error}")
 
 # ==========================================
 # 🗄️ 靜態遊戲資料與 AI 性格設定
@@ -184,10 +210,10 @@ def get_general_stats(name: str):
 
 def check_api_status():
     try:
-        raw_text, used_model = call_ai_with_fallback("這是一個連線測試，請直接回覆『OK』。")
-        return True, f"連線成功！當前使用大腦：`{used_model}` (回應: {raw_text.strip()})"
+        raw_text, used_model = call_ai_with_fallback("這是一個連線測試，請直接回覆包含 JSON 的字串：{\"test\":\"OK\"}。")
+        return True, f"連線成功！當前值班大腦：`{used_model}` (系統判定回應正常)"
     except Exception as e:
-        return False, f"連線失敗，Gemini 與 Grok 皆無法使用。錯誤：{str(e)}"
+        return False, f"連線失敗，三大雲端皆無法使用。錯誤：{str(e)}"
 
 # ==========================================
 # 🧠 AI 本地演算法 (0 延遲，不消耗 API)
@@ -205,10 +231,10 @@ def get_ai_cards_local(available_cards: list, personality_name: str) -> list:
     return [card[0] for card in card_stats[:3]]
 
 # ==========================================
-# 🧠 劇本金庫生成器 (全場只消耗 1 次 API，極大化利用 TPM)
+# 🧠 劇本金庫生成器 (開局一次性生成)
 # ==========================================
 def generate_dialogue_vault(personalities: list) -> dict:
-    if not (gemini_client or grok_client): return {}
+    if not (gemini_client or groq_client or grok_client): return {}
     
     personalities_str = ", ".join(personalities)
     prompt = f"""
@@ -225,24 +251,27 @@ def generate_dialogue_vault(personalities: list) -> dict:
     
     請嚴格回傳 JSON，格式如下：
     {{
-      "性格名稱 (例如 【神算子】)": {{
+      "{personalities[0]}": {{
          "武力": {{"1": "...", "2": "...", "3": "...", "4": "..."}},
          "智力": {{"1": "...", "2": "...", "3": "...", "4": "..."}},
          "統帥": {{"1": "...", "2": "...", "3": "...", "4": "..."}},
          "政治": {{"1": "...", "2": "...", "3": "...", "4": "..."}},
          "魅力": {{"1": "...", "2": "...", "3": "...", "4": "..."}},
          "運氣": {{"1": "...", "2": "...", "3": "...", "4": "..."}}
-      }},
-      "其他性格...": {{...}}
+      }}
     }}
+    請確保所有性格都包含在內。
     """
     try:
-        # 使用我們的雙引擎終極調度器
         raw_text, used_model = call_ai_with_fallback(prompt)
         logging.info(f"[Dialogue Vault] 劇本生成成功，歸功於：{used_model}")
         
-        if raw_text.startswith("```json"): raw_text = raw_text[7:-3].strip()
-        elif raw_text.startswith("```"): raw_text = raw_text[3:-3].strip()
+        # 嚴格清理 Markdown
+        if "```json" in raw_text:
+            raw_text = raw_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in raw_text:
+            raw_text = raw_text.split("```")[1].strip()
+            
         return json.loads(raw_text)
     except Exception as e:
         logging.error(f"[Dialogue Vault] 劇本生成失敗: {e}")
@@ -288,7 +317,6 @@ def start_game(code: str):
         room["ai_personalities"][ai_id] = pers
         ai_personality_list.append(pers)
         
-    # 開局時耗費唯一 1 次 API 額度，載滿大卡車！
     room["dialogue_vault"] = generate_dialogue_vault(ai_personality_list)
     room["status"] = "playing"
 
@@ -369,10 +397,10 @@ def render_lobby():
                 st.session_state.current_room = c; d["players"][st.session_state.player_id] = ""; st.rerun()
             except ValueError as e: st.error(e)
     st.divider()
-    with st.expander("📡 系統與雙引擎連線診斷 (開發者工具)"):
-        st.write("測試引擎會自動在您的 Gemini 與 Grok 之間尋找可用配額。")
+    with st.expander("📡 三雲端 AI 引擎診斷 (Gemini / Groq / Grok)"):
+        st.write("測試引擎會依序在三大平台上尋找可用配額，確保伺服器永不斷線。")
         if st.button("🔌 測試跨雲端動態路由", type="secondary"):
-            with st.spinner("正在呼叫雙擎 AI 系統..."):
+            with st.spinner("正在呼叫三雲端 AI 系統..."):
                 is_ok, msg = check_api_status()
                 if is_ok: st.success(msg)
                 else: st.error(msg)
@@ -395,7 +423,7 @@ def render_room():
                 assign_faction(code, pid, f); st.rerun()
         
         if st.button("🚀 開始遊戲", type="primary"): 
-            with st.spinner("🔮 雙擎 AI 正在推演天下大局 (正在產生全場專屬劇本，請稍候)..."):
+            with st.spinner("🔮 三雲端 AI 正在推演天下大局 (正在產生全場專屬劇本，請稍候)..."):
                 start_game(code)
             st.rerun()
 
