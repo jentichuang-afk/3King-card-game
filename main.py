@@ -49,6 +49,25 @@ GLOBAL_ROOMS = get_global_rooms()
 VALID_FACTIONS = ["魏", "蜀", "吳", "其他"]
 
 # ==========================================
+# 🎨 動態頭像映射表 (Avatar Mapping)
+# ==========================================
+# 定義每個 AI 性格在不同名次下對應的圖片檔名
+AVATAR_FILES = {
+    "【神算子】": {
+        1: "avatars/strategist_1.png", 2: "avatars/strategist_2.png",
+        3: "avatars/strategist_3.png", 4: "avatars/strategist_4.png"
+    },
+    "【霸道梟雄】": {
+        1: "avatars/warlord_1.png", 2: "avatars/warlord_2.png",
+        3: "avatars/warlord_3.png", 4: "avatars/warlord_4.png"
+    },
+    "【守護之盾】": {
+        1: "avatars/shield_1.png", 2: "avatars/shield_2.png",
+        3: "avatars/shield_3.png", 4: "avatars/shield_4.png"
+    }
+}
+
+# ==========================================
 # 🤖 跨三雲端動態模型備援機制
 # ==========================================
 GEMINI_MODELS = ["gemini-3.0-flash", "gemini-2.5-flash-lite", "gemini-2.5-flash"]
@@ -153,7 +172,7 @@ def get_general_stats(name: str):
 def check_api_status():
     try:
         raw_text, used_model = call_ai_with_fallback("這是一個連線測試，請直接回覆包含 JSON 的字串：{\"test\":\"OK\"}。")
-        return True, f"連線成功！當前值班大腦：`{used_model}` (系統判定回應正常)"
+        return True, f"連線成功！當前值班大腦：`{used_model}`"
     except Exception as e:
         return False, f"連線失敗，三大雲端皆無法使用。錯誤：{str(e)}"
 
@@ -169,7 +188,7 @@ def get_ai_cards_local(available_cards: list, personality_name: str) -> list:
     return [card[0] for card in card_stats[:3]]
 
 # ==========================================
-# 🧠 劇本金庫生成器 (🔥 加入強烈的情緒與垃圾話指令)
+# 🧠 劇本金庫生成器
 # ==========================================
 def generate_dialogue_vault(personalities: list) -> dict:
     if not (gemini_client or groq_client or grok_client): return {}
@@ -183,20 +202,16 @@ def generate_dialogue_vault(personalities: list) -> dict:
     包含 6 種比拼屬性：武力(單挑衝鋒)、智力(計謀看破)、統帥(排兵布陣)、政治(朝堂後勤)、魅力(激勵人心)、運氣(天象變換)。
     請為該性格在各種屬性下，寫出 4 種名次反應。務必展現出濃烈的情緒、強烈嘲諷與三國韻味（每句字數嚴格控制在 15 到 35 字之間）：
     
-    "1": 第 1 名的反應（極度囂張、無情嘲諷對手。例：吾之智謀天下無雙，爾等不過是井底之蛙，不堪一擊！）
-    "2": 第 2 名的反應（極不甘心、咬牙切齒放狠話。例：哼！這次算你運氣好，下次定叫爾等灰飛煙滅！）
-    "3": 第 3 名的反應（死要面子、瘋狂找藉口。例：若非昨日將士水土不服，這區區陣法豈能破我大軍...）
-    "4": 第 4 名的反應（徹底崩潰、仰天長嘆或哀嚎。例：既生瑜，何生亮！天要亡我，這難道是非戰之罪嗎！）
+    "1": 第 1 名的反應（極度囂張、無情嘲諷對手）
+    "2": 第 2 名的反應（極不甘心、咬牙切齒放狠話）
+    "3": 第 3 名的反應（死要面子、瘋狂找藉口）
+    "4": 第 4 名的反應（徹底崩潰、仰天長嘆或哀嚎）
     
     請嚴格回傳 JSON，格式如下：
     {{
       "{personalities[0]}": {{
          "武力": {{"1": "...", "2": "...", "3": "...", "4": "..."}},
-         "智力": {{"1": "...", "2": "...", "3": "...", "4": "..."}},
-         "統帥": {{"1": "...", "2": "...", "3": "...", "4": "..."}},
-         "政治": {{"1": "...", "2": "...", "3": "...", "4": "..."}},
-         "魅力": {{"1": "...", "2": "...", "3": "...", "4": "..."}},
-         "運氣": {{"1": "...", "2": "...", "3": "...", "4": "..."}}
+         ...
       }}
     }}
     請確保包含所有輸入的性格，且不要給出單純的四字成語，要寫出有靈魂的句子！
@@ -327,14 +342,6 @@ def render_lobby():
                 st.session_state.player_id = validate_id(pid_input)
                 st.session_state.current_room = c; d["players"][st.session_state.player_id] = ""; st.rerun()
             except ValueError as e: st.error(e)
-    st.divider()
-    with st.expander("📡 三雲端 AI 引擎診斷 (Gemini / Groq / Grok)"):
-        st.write("測試引擎會依序在三大平台上尋找可用配額，確保伺服器永不斷線。")
-        if st.button("🔌 測試跨雲端動態路由", type="secondary"):
-            with st.spinner("正在呼叫三雲端 AI 系統..."):
-                is_ok, msg = check_api_status()
-                if is_ok: st.success(msg)
-                else: st.error(msg)
 
 def render_room():
     code, pid = st.session_state.current_room, st.session_state.player_id
@@ -386,10 +393,28 @@ def render_room():
     elif room["status"] == "resolution_result":
         st.header(f"🎲 比拼屬性：【{room['last_attr']}】")
         st.subheader("📌 本回合戰果與謀士語錄")
+        
         for p, r in sorted(room["results"].items(), key=lambda x: x[1]['rank']):
             bg_color = "🟢" if p == pid else "⚪"
             st.write(f"#### {bg_color} 第 {r['rank']} 名: {r['faction']}陣營 (+{r['pts']}分)")
-            if r["is_ai"]: st.info(f"🎭 **{r['personality']}**：「{r['quote']}」")
+            
+            # 🎨 新增：動態頭像與垃圾話 UI 整合
+            if r["is_ai"]:
+                pers = r['personality']
+                rank_num = r['rank']
+                avatar_file = AVATAR_FILES.get(pers, {}).get(rank_num, "")
+                
+                with st.container():
+                    col_img, col_txt = st.columns([1, 6])
+                    with col_img:
+                        # 若您已切好圖片放入資料夾，就會顯示；否則安全降級顯示文字
+                        if os.path.exists(avatar_file):
+                            st.image(avatar_file, use_container_width=True)
+                        else:
+                            st.markdown(f"**{pers}**<br>*(待放置頭像)*", unsafe_allow_html=True)
+                    with col_txt:
+                        st.info(f"「{r['quote']}」")
+            
             st.write(f"出戰武將：{', '.join(r['cards'])} ➔ **總和 {r['total']}**")
             st.divider()
 
