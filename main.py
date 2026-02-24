@@ -8,12 +8,16 @@ import random
 # ==========================================
 # 🛡️ 資安配置與系統初始化
 # ==========================================
+# 設定安全日誌：確保不記錄任何 PII (如玩家明文 ID 或真實 IP)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [SECURE_LOG] - %(message)s')
 
+# 初始化客戶端 Session State (確保單一瀏覽器視窗的狀態隔離)
 if 'current_room' not in st.session_state:
     st.session_state.current_room = None
 if 'player_id' not in st.session_state:
     st.session_state.player_id = None
+
+# 模擬伺服器端的全域房間狀態庫 (實務上應使用 Redis 或資料庫)
 if 'global_rooms' not in st.session_state:
     st.session_state.global_rooms = {}
 
@@ -22,7 +26,6 @@ VALID_FACTIONS = ["魏", "蜀", "吳", "其他"]
 # ==========================================
 # 🗄️ 靜態遊戲資料 (模擬安全唯讀的資料庫)
 # ==========================================
-# 每個陣營 15 人，共 60 人
 FACTION_ROSTERS = {
     "魏": ["曹操", "張遼", "司馬懿", "夏侯惇", "郭嘉", "典韋", "許褚", "荀彧", "夏侯淵", "曹丕", "曹仁", "賈詡", "徐晃", "張郃", "龐德"],
     "蜀": ["劉備", "關羽", "諸葛亮", "張飛", "趙雲", "馬超", "黃忠", "魏延", "龐統", "姜維", "法正", "黃月英", "馬岱", "關平", "劉禪"],
@@ -31,8 +34,7 @@ FACTION_ROSTERS = {
 }
 
 def get_general_stats(name: str):
-    """模擬從資料庫安全讀取武將數值 (此處以隨機生成代替，實際應查表)"""
-    # 使用 name 作為亂數種子，確保同一個武將的數值在遊戲中是固定的
+    """模擬從資料庫安全讀取武將數值。使用 name 作為亂數種子，確保數值固定防竄改"""
     rng = random.Random(name) 
     return {
         "武力": rng.randint(40, 100), "智力": rng.randint(40, 100),
@@ -41,28 +43,32 @@ def get_general_stats(name: str):
     }
 
 # ==========================================
-# ⚙️ 核心邏輯與狀態管理器
+# ⚙️ 大廳與房間管理邏輯
 # ==========================================
-
 def generate_secure_room_code() -> str:
+    """使用密碼學安全的隨機數生成 6 碼房號"""
     return secrets.token_hex(3).upper()
 
 def validate_and_sanitize_id(raw_id: str) -> str:
+    """嚴格的輸入驗證與 HTML 轉義，防禦 XSS"""
     if not raw_id: return ""
     if not re.match(r"^[a-zA-Z0-9_]{3,12}$", raw_id):
         raise ValueError("玩家 ID 僅限 3~12 碼英數字與底線。")
     return html.escape(raw_id)
 
 def init_room_state(room_code: str):
+    """安全初始化房間狀態機"""
     if room_code not in st.session_state.global_rooms:
         st.session_state.global_rooms[room_code] = {
             "players": {},         # { player_id: faction }
             "ai_factions": [],     # ["魏", "吳"...]
-            "status": "lobby",     # lobby -> playing -> resolution -> finished
+            "status": "lobby",     # lobby -> playing -> resolution_pending -> resolution_result -> finished
             "round": 1,            # 目前回合 (1~5)
-            "decks": {},           # 每個玩家/AI 剩餘的可用武將 { id: [武將名...] }
+            "decks": {},           # 剩餘可用武將 { id: [武將名...] }
             "locked_cards": {},    # 本回合暗選的 3 張牌 { id: [武將名...] }
-            "scores": {}           # 總積分 { id: int }
+            "scores": {},          # 總積分 { id: int }
+            "last_chosen_attr": "",# 剛骰出的屬性
+            "last_round_results": {} # 本回合結算報表
         }
 
 def create_room(player_id: str):
@@ -98,8 +104,10 @@ def assign_faction(room_code: str, player_id: str, requested_faction: str) -> bo
     room["players"][player_id] = requested_faction
     return True
 
+# ==========================================
+# ⚔️ 遊戲核心邏輯 (伺服器端狀態權威)
+# ==========================================
 def fill_ai_factions_and_start(room_code: str):
-    """狀態流轉：大廳 -> 遊戲開始，並進行安全發牌"""
     room = st.session_state.global_rooms.get(room_code)
     if not room or room["status"] != "lobby": return
 
@@ -107,60 +115,107 @@ def fill_ai_factions_and_start(room_code: str):
     remaining_factions = [f for f in VALID_FACTIONS if f not in taken_factions]
     room["ai_factions"] = remaining_factions
     
-    # 1. 伺服器端安全發牌：初始化所有真人與 AI 的牌庫 (15 張)
+    # 初始化真人與 AI 牌庫與積分
     for pid, faction in room["players"].items():
         room["decks"][pid] = list(FACTION_ROSTERS[faction])
         room["scores"][pid] = 0
-        
     for ai_fac in room["ai_factions"]:
         ai_id = f"AI_{ai_fac}"
         room["decks"][ai_id] = list(FACTION_ROSTERS[ai_fac])
         room["scores"][ai_id] = 0
 
-    # 2. 狀態機推進至佈陣階段
     room["status"] = "playing" 
     logging.info(f"Room {room_code} locked. Decks dealt safely.")
 
 def lock_in_cards(room_code: str, player_id: str, selected_cards: list):
-    """伺服器端驗證出牌，防禦竄改與防偷看機制"""
+    """伺服器端驗證出牌，防禦竄改與暗選機制"""
     room = st.session_state.global_rooms.get(room_code)
     if not room or room["status"] != "playing": return
     
-    # 防禦驗證 1：確保選了剛好 3 張
     if len(selected_cards) != 3:
         st.error("必須選擇剛好 3 名武將！")
         return
         
-    # 防禦驗證 2：防重播與竄改 (確保這 3 張牌真的在玩家的剩餘牌庫中)
     player_deck = room["decks"].get(player_id, [])
     if not all(card in player_deck for card in selected_cards):
         logging.warning(f"Tampering detected! {player_id[:2]}*** tried to play invalid cards.")
         st.error("檢測到異常出牌，請重新選擇！")
         return
 
-    # 安全寫入：存入 locked_cards，此時絕對不廣播給其他玩家
     room["locked_cards"][player_id] = selected_cards
     logging.info(f"Player {player_id[:2]}*** locked in 3 cards securely.")
     
-    # AI 自動出牌邏輯 (若 AI 尚未出牌)
+    # AI 自動出牌 (隨機策略)
     for ai_fac in room["ai_factions"]:
         ai_id = f"AI_{ai_fac}"
         if ai_id not in room["locked_cards"]:
-            import random
             ai_deck = room["decks"][ai_id]
-            # AI 隨機選 3 張 (後續可升級為 LLM 決策)
             room["locked_cards"][ai_id] = random.sample(ai_deck, 3)
 
-    # 檢查是否所有人(4個陣營)都已出牌
     total_factions = len(room["players"]) + len(room["ai_factions"])
     if len(room["locked_cards"]) == total_factions:
-        room["status"] = "resolution" # 所有人準備完畢，進入結算擲骰子階段
-        logging.info(f"Room {room_code} all locked. Entering resolution phase.")
+        room["status"] = "resolution_pending" # 所有人準備完畢，進入決算階段
+
+def resolve_round(room_code: str):
+    """伺服器端決算引擎：包含安全擲骰、計分與防重播扣牌"""
+    room = st.session_state.global_rooms.get(room_code)
+    if not room or room["status"] != "resolution_pending": return
+
+    # 1. 伺服器端密碼學安全擲骰 (CSPRNG)
+    secure_rng = secrets.SystemRandom()
+    attributes = ["武力", "智力", "統帥", "政治", "魅力", "運氣"]
+    chosen_attr = secure_rng.choice(attributes)
+    
+    # 2. 計算各陣營總和
+    player_totals = {}
+    for pid, cards in room["locked_cards"].items():
+        total = sum(get_general_stats(card)[chosen_attr] for card in cards)
+        player_totals[pid] = total
+        
+    # 3. 排序與計分 (方案A：平手同分邏輯 5,3,2,1)
+    sorted_players = sorted(player_totals.items(), key=lambda x: x[1], reverse=True)
+    score_distribution = {0: 5, 1: 3, 2: 2, 3: 1}
+    round_results = {}
+    current_rank = 0
+    
+    for i in range(len(sorted_players)):
+        pid, attr_total = sorted_players[i]
+        if i > 0 and attr_total == sorted_players[i-1][1]:
+            pass # 平分秋色，名次索引不推進
+        else:
+            current_rank = i
+            
+        points_earned = score_distribution.get(current_rank, 0)
+        room["scores"][pid] += points_earned
+        
+        faction_name = room["players"].get(pid, pid.replace("AI_", ""))
+        round_results[pid] = {
+            "faction": faction_name, "cards": room["locked_cards"][pid],
+            "attr_total": attr_total, "points_earned": points_earned, "rank": current_rank + 1
+        }
+        
+        # 4. 安全扣牌：從可用牌庫中刪除已使用的牌
+        room["decks"][pid] = [c for c in room["decks"][pid] if c not in room["locked_cards"][pid]]
+
+    room["last_chosen_attr"] = chosen_attr
+    room["last_round_results"] = round_results
+    room["status"] = "resolution_result" 
+    logging.info(f"Room {room_code} Round {room['round']} resolved. Attr: {chosen_attr}")
+
+def next_round_or_finish(room_code: str):
+    room = st.session_state.global_rooms.get(room_code)
+    if not room or room["status"] != "resolution_result": return
+    
+    room["locked_cards"] = {}
+    if room["round"] >= 5:
+        room["status"] = "finished"
+    else:
+        room["round"] += 1
+        room["status"] = "playing"
 
 # ==========================================
 # 🖥️ Streamlit 前端渲染視圖
 # ==========================================
-# (render_lobby 保持與先前相同，此處略過以節省空間，請沿用上一版)
 def render_lobby():
     st.title("⚔️ 三國之巔：大廳")
     col1, col2 = st.columns(2)
@@ -194,7 +249,8 @@ def render_room():
             taken_by = [p for p, f in room["players"].items() if f == faction]
             with cols[idx]:
                 if is_taken:
-                    st.button(f"{faction}\n(已選擇)", disabled=True, key=f"btn_{faction}")
+                    display_name = taken_by[0] if taken_by[0] == player_id else f"{taken_by[0][:2]}***"
+                    st.button(f"{faction}\n(已由 {display_name} 選擇)", disabled=True, key=f"btn_{faction}")
                 else:
                     if st.button(f"選擇 {faction}", key=f"btn_{faction}"):
                         assign_faction(room_code, player_id, faction); st.rerun()
@@ -212,14 +268,9 @@ def render_room():
         
         if has_locked:
             st.info("🔒 你已鎖定本回合的 3 名武將！等待其他對手中...")
-            # 安全設計：這裡絕對不顯示其他人出了什麼牌
             if st.button("🔄 刷新狀態", type="primary"): st.rerun()
         else:
-            st.write("請從下方點選 3 名武將出戰：")
-            # 使用 multiselect 讓玩家挑選
-            selected = st.multiselect("選擇出戰武將 (限3名)", options=player_deck, max_selections=3)
-            
-            # 顯示選中武將的數值供玩家參考
+            selected = st.multiselect("請從下方點選 3 名武將出戰：", options=player_deck, max_selections=3)
             if selected:
                 cols = st.columns(len(selected))
                 for i, name in enumerate(selected):
@@ -230,20 +281,57 @@ def render_room():
             
             if st.button("🔐 鎖定出戰陣容 (點擊後不可更改)", type="primary"):
                 if len(selected) == 3:
-                    lock_in_cards(room_code, player_id, selected)
-                    st.rerun()
+                    lock_in_cards(room_code, player_id, selected); st.rerun()
                 else:
                     st.warning("主公，必須精確點齊 3 名武將方可出征！")
 
-    # --- 狀態 3：Resolution 結算階段 (待後續開發) ---
-    elif room["status"] == "resolution":
-        st.success("🎉 所有陣營皆已出牌！")
-        st.info("請房主擲骰子以決定本回合比拼的屬性！(即將實作)")
-        if st.button("測試：重置回合(開發用)"):
-            room["status"] = "playing"
-            room["locked_cards"] = {}
+    # --- 狀態 3：Resolution Pending 等待擲骰 ---
+    elif room["status"] == "resolution_pending":
+        st.success("🎉 所有陣營皆已出戰！")
+        st.info("等待系統進行安全亂數擲骰與戰果結算...")
+        if st.button("🎲 擲骰子並揭曉戰果 (伺服器端驗證)", type="primary"):
+            resolve_round(room_code); st.rerun()
+
+    # --- 狀態 4：Resolution Result 戰報揭曉 ---
+    elif room["status"] == "resolution_result":
+        st.title("⚔️ 戰報揭曉")
+        chosen_attr = room["last_chosen_attr"]
+        st.markdown(f"### 🎲 本回合比拼屬性：**【{chosen_attr}】**")
+        
+        results = room["last_round_results"]
+        sorted_res = sorted(results.items(), key=lambda x: x[1]["rank"])
+        
+        for pid, res in sorted_res:
+            is_me = (pid == player_id)
+            bg_color = "🟢" if is_me else "⚪"
+            st.write(f"#### {bg_color} 第 {res['rank']} 名：{res['faction']}陣營 (+{res['points_earned']} 分)")
+            st.write(f"出戰武將：{', '.join(res['cards'])} ➔ **總和 {res['attr_total']}**")
+            st.divider()
+            
+        if st.button("⏭️ 進入下一回合", type="primary", use_container_width=True):
+            next_round_or_finish(room_code); st.rerun()
+
+    # --- 狀態 5：Finished 遊戲結束 ---
+    elif room["status"] == "finished":
+        st.snow()
+        st.title("🏆 戰局結束！天下大勢底定")
+        st.subheader("📊 最終積分排行榜")
+        
+        final_scores = sorted(room["scores"].items(), key=lambda x: x[1], reverse=True)
+        for rank, (pid, score) in enumerate(final_scores):
+            faction = room["players"].get(pid, pid.replace("AI_", ""))
+            medal = "🥇" if rank == 0 else "🥈" if rank == 1 else "🥉" if rank == 2 else "🎖️"
+            st.markdown(f"**{medal} {faction}陣營**：**{score}** 分")
+            
+        if st.button("🚪 離開房間並返回大廳"):
+            # 安全清除客戶端記憶體
+            st.session_state.current_room = None
+            st.session_state.player_id = None
             st.rerun()
 
+# ==========================================
+# 🚀 應用程式主路由
+# ==========================================
 if st.session_state.current_room is None:
     render_lobby()
 else:
