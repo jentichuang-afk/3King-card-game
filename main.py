@@ -248,11 +248,17 @@ def assign_faction(code: str, pid: str, faction: str):
 
 def start_game(code: str):
     room = GLOBAL_ROOMS.get(code)
+    
+    # 🛡️ 防呆機制：清除已加入但未選擇陣營的幽靈玩家
+    unassigned = [p for p, f in room["players"].items() if f not in VALID_FACTIONS]
+    for p in unassigned:
+        del room["players"][p]
+        
     taken = list(room["players"].values())
     room["ai_factions"] = [f for f in VALID_FACTIONS if f not in taken]
     
-    for pid, f in room["players"].items():
-        room["decks"][pid], room["scores"][pid] = list(FACTION_ROSTERS[f]), 0
+    for p_id, f in room["players"].items():
+        room["decks"][p_id], room["scores"][p_id] = list(FACTION_ROSTERS[f]), 0
         
     available_personalities = list(AI_PERSONALITIES.keys())
     random.shuffle(available_personalities)
@@ -341,6 +347,13 @@ def render_lobby():
                 st.session_state.player_id = validate_id(pid_input)
                 st.session_state.current_room = c; d["players"][st.session_state.player_id] = ""; st.rerun()
             except ValueError as e: st.error(e)
+    st.divider()
+    with st.expander("📡 三雲端 AI 引擎診斷 (Gemini / Groq / Grok)"):
+        if st.button("🔌 測試跨雲端動態路由", type="secondary"):
+            with st.spinner("正在呼叫三雲端 AI 系統..."):
+                is_ok, msg = check_api_status()
+                if is_ok: st.success(msg)
+                else: st.error(msg)
 
 def render_room():
     code, pid = st.session_state.current_room, st.session_state.player_id
@@ -359,13 +372,22 @@ def render_room():
             if cols[i].button(f"{f}" + (" (已選)" if taken else ""), disabled=taken):
                 assign_faction(code, pid, f); st.rerun()
         
-        if st.button("🚀 開始遊戲", type="primary"): 
-            with st.spinner("🔮 三雲端 AI 正在推演天下大局 (正在撰寫全場專屬垃圾話劇本，請稍候)..."):
-                start_game(code)
-            st.rerun()
+        # 🛡️ 防呆判斷：必須選好陣營才能開始遊戲
+        has_faction = pid in room["players"] and room["players"][pid] in VALID_FACTIONS
+        if not has_faction:
+            st.info("👆 主公，請先在上方選擇您的專屬陣營，才能發兵出征！")
+        else:
+            if st.button("🚀 開始遊戲", type="primary"): 
+                with st.spinner("🔮 三雲端 AI 正在推演天下大局 (正在撰寫全場專屬垃圾話劇本，請稍候)..."):
+                    start_game(code)
+                st.rerun()
 
     elif room["status"] == "playing":
-        if pid in room["locked_cards"]: 
+        # 🛡️ 觀戰模式保護：若沒選陣營就開局，降級為觀戰模式
+        if pid not in room["decks"]:
+            st.warning("👀 您本局並未選擇陣營，目前處於觀戰模式。請等待場上玩家完成決策。")
+            if st.button("🔄 刷新戰況"): st.rerun()
+        elif pid in room["locked_cards"]: 
             st.info("🔒 陣容已鎖定。等待對手部署..."); st.button("🔄 刷新")
         else:
             deck = room["decks"][pid]
@@ -384,10 +406,14 @@ def render_room():
             else: st.warning(f"請在上方表格精確勾選 3 位武將 (目前 {len(sel_idx)}/3)")
 
     elif room["status"] == "resolution_pending":
-        st.success("各路諸侯皆已佈陣完畢！")
-        if st.button("🎲 擲骰子並揭曉戰場實況", type="primary", use_container_width=True):
-            resolve_round(code)
-            st.rerun()
+        if pid not in room["decks"]:
+            st.info("👀 觀戰中：各路諸侯皆已佈陣完畢！等待場上主公結算。")
+            if st.button("🔄 刷新等待結算"): st.rerun()
+        else:
+            st.success("各路諸侯皆已佈陣完畢！")
+            if st.button("🎲 擲骰子並揭曉戰場實況", type="primary", use_container_width=True):
+                resolve_round(code)
+                st.rerun()
 
     elif room["status"] == "resolution_result":
         st.header(f"🎲 比拼屬性：【{room['last_attr']}】")
@@ -395,10 +421,7 @@ def render_room():
         
         for p, r in sorted(room["results"].items(), key=lambda x: x[1]['rank']):
             bg_color = "🟢" if p == pid else "⚪"
-            
-            # ✨ 核心更動：將顯示名稱替換為主公名號或 AI 性格
             display_name = f"{r['personality']} ({r['faction']})" if r["is_ai"] else f"主公 {p} ({r['faction']})"
-            
             st.write(f"#### {bg_color} 第 {r['rank']} 名: {display_name} (+{r['pts']}分)")
             
             if r["is_ai"]:
@@ -426,7 +449,6 @@ def render_room():
             faction = room["players"].get(player_key, player_key.replace("AI_", ""))
             is_ai = player_key.startswith("AI_")
             
-            # ✨ 核心更動：排行榜的名稱顯示也同步更新
             if is_ai:
                 pers = room["ai_personalities"].get(player_key, "")
                 display_name = f"{pers} ({faction})"
@@ -441,8 +463,12 @@ def render_room():
         st.dataframe(pd.DataFrame(score_data), hide_index=True, use_container_width=True)
         st.divider()
 
-        if st.button("⏭️ 下一回合", use_container_width=True, type="primary"):
-            next_round_or_finish(code); st.rerun()
+        # 🛡️ 觀戰者防護
+        if pid not in room["decks"]:
+            if st.button("🔄 刷新看下一回合", use_container_width=True): st.rerun()
+        else:
+            if st.button("⏭️ 下一回合", use_container_width=True, type="primary"):
+                next_round_or_finish(code); st.rerun()
 
     elif room["status"] == "finished":
         st.balloons(); st.header("🏆 戰局結束！天下大勢底定")
@@ -450,7 +476,6 @@ def render_room():
             faction = room['players'].get(p, p.replace("AI_", ""))
             is_ai = p.startswith("AI_")
             
-            # ✨ 核心更動：最終結算畫面也同步更新
             if is_ai:
                 pers = room["ai_personalities"].get(p, "")
                 display_name = f"{pers} ({faction})"
