@@ -4,6 +4,7 @@ import html
 import logging
 import re
 import random
+import pandas as pd  # 新增 pandas 以支援更強大的資料表排序功能
 
 # ==========================================
 # 🛡️ 資安配置與系統初始化
@@ -46,29 +47,26 @@ def get_general_stats(name: str):
 # ⚙️ 大廳與房間管理邏輯
 # ==========================================
 def generate_secure_room_code() -> str:
-    """使用密碼學安全的隨機數生成 6 碼房號"""
     return secrets.token_hex(3).upper()
 
 def validate_and_sanitize_id(raw_id: str) -> str:
-    """嚴格的輸入驗證與 HTML 轉義，防禦 XSS"""
     if not raw_id: return ""
     if not re.match(r"^[a-zA-Z0-9_]{3,12}$", raw_id):
         raise ValueError("玩家 ID 僅限 3~12 碼英數字與底線。")
     return html.escape(raw_id)
 
 def init_room_state(room_code: str):
-    """安全初始化房間狀態機"""
     if room_code not in st.session_state.global_rooms:
         st.session_state.global_rooms[room_code] = {
-            "players": {},         # { player_id: faction }
-            "ai_factions": [],     # ["魏", "吳"...]
-            "status": "lobby",     # lobby -> playing -> resolution_pending -> resolution_result -> finished
-            "round": 1,            # 目前回合 (1~5)
-            "decks": {},           # 剩餘可用武將 { id: [武將名...] }
-            "locked_cards": {},    # 本回合暗選的 3 張牌 { id: [武將名...] }
-            "scores": {},          # 總積分 { id: int }
-            "last_chosen_attr": "",# 剛骰出的屬性
-            "last_round_results": {} # 本回合結算報表
+            "players": {},         
+            "ai_factions": [],     
+            "status": "lobby",     
+            "round": 1,            
+            "decks": {},           
+            "locked_cards": {},    
+            "scores": {},          
+            "last_chosen_attr": "",
+            "last_round_results": {} 
         }
 
 def create_room(player_id: str):
@@ -115,7 +113,6 @@ def fill_ai_factions_and_start(room_code: str):
     remaining_factions = [f for f in VALID_FACTIONS if f not in taken_factions]
     room["ai_factions"] = remaining_factions
     
-    # 初始化真人與 AI 牌庫與積分
     for pid, faction in room["players"].items():
         room["decks"][pid] = list(FACTION_ROSTERS[faction])
         room["scores"][pid] = 0
@@ -128,7 +125,6 @@ def fill_ai_factions_and_start(room_code: str):
     logging.info(f"Room {room_code} locked. Decks dealt safely.")
 
 def lock_in_cards(room_code: str, player_id: str, selected_cards: list):
-    """伺服器端驗證出牌，防禦竄改與暗選機制"""
     room = st.session_state.global_rooms.get(room_code)
     if not room or room["status"] != "playing": return
     
@@ -145,7 +141,6 @@ def lock_in_cards(room_code: str, player_id: str, selected_cards: list):
     room["locked_cards"][player_id] = selected_cards
     logging.info(f"Player {player_id[:2]}*** locked in 3 cards securely.")
     
-    # AI 自動出牌 (隨機策略)
     for ai_fac in room["ai_factions"]:
         ai_id = f"AI_{ai_fac}"
         if ai_id not in room["locked_cards"]:
@@ -154,25 +149,21 @@ def lock_in_cards(room_code: str, player_id: str, selected_cards: list):
 
     total_factions = len(room["players"]) + len(room["ai_factions"])
     if len(room["locked_cards"]) == total_factions:
-        room["status"] = "resolution_pending" # 所有人準備完畢，進入決算階段
+        room["status"] = "resolution_pending" 
 
 def resolve_round(room_code: str):
-    """伺服器端決算引擎：包含安全擲骰、計分與防重播扣牌"""
     room = st.session_state.global_rooms.get(room_code)
     if not room or room["status"] != "resolution_pending": return
 
-    # 1. 伺服器端密碼學安全擲骰 (CSPRNG)
     secure_rng = secrets.SystemRandom()
     attributes = ["武力", "智力", "統帥", "政治", "魅力", "運氣"]
     chosen_attr = secure_rng.choice(attributes)
     
-    # 2. 計算各陣營總和
     player_totals = {}
     for pid, cards in room["locked_cards"].items():
         total = sum(get_general_stats(card)[chosen_attr] for card in cards)
         player_totals[pid] = total
         
-    # 3. 排序與計分 (方案A：平手同分邏輯 5,3,2,1)
     sorted_players = sorted(player_totals.items(), key=lambda x: x[1], reverse=True)
     score_distribution = {0: 5, 1: 3, 2: 2, 3: 1}
     round_results = {}
@@ -181,7 +172,7 @@ def resolve_round(room_code: str):
     for i in range(len(sorted_players)):
         pid, attr_total = sorted_players[i]
         if i > 0 and attr_total == sorted_players[i-1][1]:
-            pass # 平分秋色，名次索引不推進
+            pass 
         else:
             current_rank = i
             
@@ -194,7 +185,6 @@ def resolve_round(room_code: str):
             "attr_total": attr_total, "points_earned": points_earned, "rank": current_rank + 1
         }
         
-        # 4. 安全扣牌：從可用牌庫中刪除已使用的牌
         room["decks"][pid] = [c for c in room["decks"][pid] if c not in room["locked_cards"][pid]]
 
     room["last_chosen_attr"] = chosen_attr
@@ -258,7 +248,7 @@ def render_room():
         if st.button("🚀 所有人準備完畢，開始遊戲！", type="primary", disabled=len(room["players"])==0):
             fill_ai_factions_and_start(room_code); st.rerun()
 
-    # --- 狀態 2：Playing 暗選出牌階段 ---
+    # --- 狀態 2：Playing 暗選出牌階段 (🛡️ 更新：加入 6 種屬性面板) ---
     elif room["status"] == "playing":
         player_faction = room['players'].get(player_id)
         player_deck = room['decks'].get(player_id, [])
@@ -270,14 +260,36 @@ def render_room():
             st.info("🔒 你已鎖定本回合的 3 名武將！等待其他對手中...")
             if st.button("🔄 刷新狀態", type="primary"): st.rerun()
         else:
-            selected = st.multiselect("請從下方點選 3 名武將出戰：", options=player_deck, max_selections=3)
+            # 建立唯讀的安全情報面板 (使用 DataFrame 讓玩家可以點擊表頭排序)
+            st.write("📊 **軍情處：可用武將能力一覽表** (可點擊欄位標題排序)")
+            deck_data = []
+            for name in player_deck:
+                stats = get_general_stats(name)
+                deck_data.append({
+                    "武將名": name,
+                    "武力": stats["武力"], "智力": stats["智力"], "統帥": stats["統帥"],
+                    "政治": stats["政治"], "魅力": stats["魅力"], "運氣": stats["運氣"]
+                })
+            
+            # 渲染資料表
+            df = pd.DataFrame(deck_data)
+            st.dataframe(df, hide_index=True, use_container_width=True)
+
+            # 選牌區
+            st.divider()
+            selected = st.multiselect("👇 請從上方名單點選 3 名武將出戰：", options=player_deck, max_selections=3)
+            
             if selected:
+                st.write("⚔️ **目前選定出戰陣容：**")
                 cols = st.columns(len(selected))
                 for i, name in enumerate(selected):
                     stats = get_general_stats(name)
                     with cols[i]:
-                        st.caption(f"**{name}**")
-                        st.write(f"武:{stats['武力']} 智:{stats['智力']} 統:{stats['統帥']}")
+                        st.markdown(f"**{name}**")
+                        # 使用 st.code 讓數值對齊排版，更具科技感與儀表板風格
+                        st.code(f"武力:{stats['武力']:>3}  政治:{stats['政治']:>3}\n"
+                                f"智力:{stats['智力']:>3}  魅力:{stats['魅力']:>3}\n"
+                                f"統帥:{stats['統帥']:>3}  運氣:{stats['運氣']:>3}")
             
             if st.button("🔐 鎖定出戰陣容 (點擊後不可更改)", type="primary"):
                 if len(selected) == 3:
