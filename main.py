@@ -7,7 +7,8 @@ import pandas as pd
 import random
 import json
 import os
-import google.generativeai as genai
+# 🚀 引入全新世代的 Google GenAI SDK
+from google import genai
 
 # ==========================================
 # 🛡️ 資安配置與系統初始化
@@ -22,12 +23,11 @@ if not API_KEY:
     except Exception:
         API_KEY = None
 
+# 初始化全新的 google-genai 終端 (Client)
 if API_KEY:
-    genai.configure(api_key=API_KEY)
-    # 使用輕量且快速的模型，適合遊戲即時決策
-    MODEL = genai.GenerativeModel('gemini-1.5-flash') 
+    ai_client = genai.Client(api_key=API_KEY)
 else:
-    MODEL = None
+    ai_client = None
     logging.warning("未偵測到 GEMINI_API_KEY，AI 將採用預設隨機決策。")
 
 # 個人狀態隔離 (Session State)
@@ -128,28 +128,29 @@ def get_general_stats(name: str):
     return GENERALS_STATS.get(name, {"武力": 50, "智力": 50, "統帥": 50, "政治": 50, "魅力": 50, "運氣": 50})
 
 # ==========================================
-# 📡 系統偵錯：API 連線測試
+# 📡 系統偵錯：API 連線測試 (次世代 SDK 寫法)
 # ==========================================
 def check_api_status():
-    """發送最輕量的請求，用以診斷 Gemini API 是否連線成功"""
-    if not MODEL:
+    if not ai_client:
         return False, "API 金鑰未設定 (API_KEY is missing or undefined)。請檢查 Secrets 設定。"
     try:
-        # 發送極短 prompt 以測試通訊
-        response = MODEL.generate_content("這是一個連線測試，請直接回覆『OK』。")
+        response = ai_client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents="這是一個連線測試，請直接回覆『OK』。"
+        )
         if response.text:
             return True, f"連線成功！Gemini API 回應正常。(回應內容: {response.text.strip()})"
     except Exception as e:
         return False, f"連線失敗，錯誤代碼或原因：{str(e)}"
 
 # ==========================================
-# 🧠 AI 決策引擎 (Gemini API 整合)
+# 🧠 AI 決策引擎 (次世代 SDK 整合)
 # ==========================================
 def get_ai_decision(ai_id: str, available_cards: list, round_num: int, personality_name: str) -> tuple:
     fallback_cards = random.sample(available_cards, 3)
     fallback_quote = f"吾乃{personality_name}，且看我這回合的排兵布陣！"
 
-    if not MODEL:
+    if not ai_client:
         return fallback_cards, fallback_quote
 
     personality_desc = AI_PERSONALITIES.get(personality_name, "")
@@ -168,7 +169,10 @@ def get_ai_decision(ai_id: str, available_cards: list, round_num: int, personali
     """
 
     try:
-        response = MODEL.generate_content(prompt)
+        response = ai_client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt
+        )
         raw_text = response.text.strip()
         if raw_text.startswith("```json"): raw_text = raw_text[7:-3].strip()
         elif raw_text.startswith("```"): raw_text = raw_text[3:-3].strip()
@@ -291,11 +295,11 @@ def render_lobby():
             except ValueError as e: st.error(e)
             
     st.divider()
-    # 📡 新增：API 連線狀態診斷區塊
+    # 📡 API 連線狀態診斷區塊
     with st.expander("📡 系統與 API 連線診斷 (開發者工具)"):
         st.write("點擊下方按鈕測試 Gemini API 是否能正常通訊。如果對戰中出現「訊號干擾」，可在此確認連線狀態。")
         if st.button("🔌 測試 API 連線狀態", type="secondary"):
-            with st.spinner("正在呼叫 Gemini API..."):
+            with st.spinner("正在呼叫 Gemini 2.5 API..."):
                 is_ok, msg = check_api_status()
                 if is_ok:
                     st.success(msg)
