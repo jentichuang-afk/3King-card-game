@@ -15,6 +15,7 @@ from google import genai
 # ==========================================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [SECURE_LOG] - %(message)s')
 
+# 安全載入 API Key (支援環境變數或 Streamlit Secrets)
 API_KEY = os.getenv("GEMINI_API_KEY")
 if not API_KEY:
     try:
@@ -22,23 +23,61 @@ if not API_KEY:
     except Exception:
         API_KEY = None
 
+# 初始化全新的 google-genai 終端 (Client)
 if API_KEY:
     ai_client = genai.Client(api_key=API_KEY)
 else:
     ai_client = None
     logging.warning("未偵測到 GEMINI_API_KEY，AI 將採用預設隨機決策。")
 
+# 個人狀態隔離 (Session State)
 if 'current_room' not in st.session_state:
     st.session_state.current_room = None
 if 'player_id' not in st.session_state:
     st.session_state.player_id = None
 
+# 伺服器全域記憶體 (Global State)
 @st.cache_resource
 def get_global_rooms():
     return {}
 
 GLOBAL_ROOMS = get_global_rooms()
+
 VALID_FACTIONS = ["魏", "蜀", "吳", "其他"]
+
+# ==========================================
+# 🤖 智慧型動態模型備援機制 (Dynamic Fallback)
+# ==========================================
+# 定義模型優先順序 (由上到下嘗試)
+MODEL_HIERARCHY = [
+    "gemini-2.5-flash",       # 首選：最新最快 (配額可能用盡)
+    "gemini-3.0-flash",       # 備援 1：次世代模型 (有額外配額)
+    "gemini-2.5-flash-lite",  # 備援 2：輕量版模型 (極速且配額獨立)
+    "gemini-1.5-flash"        # 最終防線：舊版相容
+]
+
+def call_gemini_with_fallback(prompt: str) -> tuple:
+    """自動嘗試多個模型，如果遇到配額用盡(429)或其他錯誤，自動切換至下一個模型"""
+    if not ai_client:
+        raise ValueError("API Client 未初始化")
+        
+    last_error = None
+    for model_name in MODEL_HIERARCHY:
+        try:
+            response = ai_client.models.generate_content(
+                model=model_name,
+                contents=prompt
+            )
+            if response.text:
+                logging.info(f"[AI Routing] 成功使用模型: {model_name}")
+                return response.text, model_name
+        except Exception as e:
+            logging.warning(f"[AI Routing] 模型 {model_name} 呼叫失敗 ({e})。正在自動切換下一個模型...")
+            last_error = e
+            continue # 發生錯誤，繼續嘗試陣列中的下一個模型
+            
+    # 如果所有模型都失敗了，拋出最後一個錯誤讓上層接手
+    raise RuntimeError(f"所有備援模型皆已耗盡或出錯。最後錯誤: {last_error}")
 
 # ==========================================
 # 🗄️ 靜態遊戲資料與 AI 性格設定
@@ -123,20 +162,18 @@ def get_general_stats(name: str):
     return GENERALS_STATS.get(name, {"武力": 50, "智力": 50, "統帥": 50, "政治": 50, "魅力": 50, "運氣": 50})
 
 def check_api_status():
-    if not ai_client: return False, "API 金鑰未設定。"
+    """使用動態切換引擎測試 API 連線"""
     try:
-        response = ai_client.models.generate_content(
-            model='gemini-2.5-flash', contents="連線測試，回覆OK。"
-        )
-        return True, f"連線成功！({response.text.strip()})"
-    except Exception as e: return False, f"連線失敗：{str(e)}"
+        raw_text, used_model = call_gemini_with_fallback("這是一個連線測試，請直接回覆『OK』。")
+        return True, f"連線成功！自動切換並使用模型：`{used_model}` (回應: {raw_text.strip()})"
+    except Exception as e:
+        return False, f"連線失敗，所有備援模型皆耗盡或出錯。錯誤原因：{str(e)}"
 
 # ==========================================
-# 🧠 AI 決策引擎 (支援情緒化名次感知)
+# 🧠 AI 決策引擎 (支援情緒化名次感知 + 動態切換)
 # ==========================================
 def get_ai_decision(ai_id: str, available_cards: list, round_num: int, personality_name: str) -> tuple:
     fallback_cards = random.sample(available_cards, 3)
-    # 若 API 失敗，使用這些防呆對話庫
     fallback_quotes = {
         "1": f"吾乃{personality_name}，這天下終究是我的！",
         "2": "大意了！下次定叫爾等灰飛煙滅！",
@@ -148,7 +185,6 @@ def get_ai_decision(ai_id: str, available_cards: list, round_num: int, personali
 
     personality_desc = AI_PERSONALITIES.get(personality_name, "")
     
-    # 🎯 核心改動：要求 AI 一次產生 4 個名次的預備台詞
     prompt = f"""
     你是一個三國卡牌對戰遊戲的AI玩家。
     你的性格設定是：{personality_name} - {personality_desc}
@@ -176,8 +212,9 @@ def get_ai_decision(ai_id: str, available_cards: list, round_num: int, personali
     """
 
     try:
-        response = ai_client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
-        raw_text = response.text.strip()
+        # 🛡️ 呼叫我們剛剛寫好的「智慧動態切換引擎」
+        raw_text, used_model = call_gemini_with_fallback(prompt)
+        
         if raw_text.startswith("```json"): raw_text = raw_text[7:-3].strip()
         elif raw_text.startswith("```"): raw_text = raw_text[3:-3].strip()
 
@@ -191,7 +228,7 @@ def get_ai_decision(ai_id: str, available_cards: list, round_num: int, personali
             logging.warning(f"AI 選牌無效，觸發回退。")
             return fallback_cards, fallback_quotes
     except Exception as e:
-        logging.error(f"AI API 失敗: {e}。觸發回退。")
+        logging.error(f"AI API 決策失敗 (所有備援耗盡): {e}。觸發回退防線。")
         return fallback_cards, fallback_quotes
 
 # ==========================================
@@ -223,14 +260,12 @@ def start_game(code: str):
     for pid, f in room["players"].items():
         room["decks"][pid], room["scores"][pid] = list(FACTION_ROSTERS[f]), 0
         
-    # 🎯 核心改動：打亂性格清單並抽出，確保絕對不重複
     available_personalities = list(AI_PERSONALITIES.keys())
     random.shuffle(available_personalities)
     
     for af in room["ai_factions"]:
         ai_id = f"AI_{af}"
         room["decks"][ai_id], room["scores"][ai_id] = list(FACTION_ROSTERS[af]), 0
-        # 安全抽取，若意外見底則使用神算子
         room["ai_personalities"][ai_id] = available_personalities.pop() if available_personalities else "【神算子】"
         
     room["status"] = "playing"
@@ -244,7 +279,6 @@ def lock_cards(code: str, pid: str, cards: list):
         if ai_id not in room["locked_cards"]:
             ai_deck = room["decks"][ai_id]
             personality = room["ai_personalities"][ai_id]
-            # 取得 3 張牌與包含 4 個名次的台詞字典
             sel_cards, quotes_dict = get_ai_decision(ai_id, ai_deck, room["round"], personality)
             room["locked_cards"][ai_id] = sel_cards
             room["ai_quotes"][ai_id] = quotes_dict
@@ -269,11 +303,9 @@ def resolve_round(code: str):
         faction_name = room["players"].get(pid, pid.replace("AI_",""))
         is_ai = pid.startswith("AI_")
         
-        # 🎯 核心改動：根據伺服器算出的真實名次 (rank_num)，提取對應的台詞
         final_quote = ""
         if is_ai:
             ai_quotes_dict = room["ai_quotes"].get(pid, {})
-            # 若字典中找不到對應名次，給予預設台詞防呆
             final_quote = ai_quotes_dict.get(str(rank_num), "局勢變幻莫測啊...")
             
         ranks[pid] = {
@@ -316,8 +348,9 @@ def render_lobby():
             except ValueError as e: st.error(e)
     st.divider()
     with st.expander("📡 系統與 API 連線診斷 (開發者工具)"):
-        if st.button("🔌 測試 API 連線狀態", type="secondary"):
-            with st.spinner("正在呼叫 Gemini 2.5 API..."):
+        st.write("測試引擎會自動在您的可用配額中尋找最適合的模型。")
+        if st.button("🔌 測試 API 動態路由", type="secondary"):
+            with st.spinner("正在尋找可用之 Gemini API..."):
                 is_ok, msg = check_api_status()
                 if is_ok: st.success(msg)
                 else: st.error(msg)
@@ -354,7 +387,8 @@ def render_room():
                 selected_names = df.iloc[sel_idx]["名"].tolist()
                 st.success(f"⚔️ 已選定出戰：{', '.join(selected_names)}")
                 if st.button("🔐 鎖定出戰 (AI 將同步進行決策)", type="primary"):
-                    with st.spinner("傳令兵正在通知其他陣營..."): lock_cards(code, pid, selected_names)
+                    with st.spinner("傳令兵正在通知其他陣營 (系統將自動調度最佳 AI 模型)..."): 
+                        lock_cards(code, pid, selected_names)
                     st.rerun()
             elif len(sel_idx) > 3: st.error(f"⚠️ 只能選擇 3 名武將！您目前選擇了 {len(sel_idx)} 名。")
             else: st.warning(f"請在上方表格精確勾選 3 位武將 (目前 {len(sel_idx)}/3)")
