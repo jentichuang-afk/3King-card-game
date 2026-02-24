@@ -149,7 +149,7 @@ def join_room(room_code: str, player_id: str):
         safe_id = validate_and_sanitize_id(player_id)
         if not re.match(r"^[A-F0-9]{6}$", room_code): raise ValueError("無效的房號格式。")
         if room_code not in GLOBAL_ROOMS: raise ValueError("找不到該房間。")
-        if GLOBAL_ROOMS[room_code]["status"] != "lobby": raise ValueError("房間已開戰。")
+        if GLOBAL_ROOMS[room_code]["status"] != "lobby": raise ValueError("房間已開戰，無法加入。")
             
         st.session_state.current_room = room_code
         st.session_state.player_id = safe_id
@@ -271,18 +271,77 @@ def next_round_or_finish(room_code: str):
 # ==========================================
 # 🖥️ Streamlit 前端渲染視圖
 # ==========================================
+
 def render_lobby():
+    """重新設計的安全大廳視圖，包含全域 ID 輸入與招募板"""
     st.title("⚔️ 三國之巔：大廳")
+    
+    # 1. 全域玩家身分設定
+    st.markdown("### 👤 第一步：確認主公名號")
+    player_id_input = st.text_input("請輸入你的玩家 ID (供本局連線使用)：", key="lobby_player_id", help="限 3~12 碼英數字")
+    
+    st.divider()
+
+    # 2. 建立與私密加入區塊
     col1, col2 = st.columns(2)
     with col1:
-        st.subheader("建立房間")
-        create_id = st.text_input("輸入你的玩家 ID", key="create_id")
-        if st.button("創建專屬房"): create_room(create_id); st.rerun()
+        st.subheader("🛠️ 建立專屬房間")
+        if st.button("創建新戰局", use_container_width=True):
+            if player_id_input:
+                create_room(player_id_input)
+                st.rerun()
+            else:
+                st.warning("請先在上方輸入玩家 ID！")
+                
     with col2:
-        st.subheader("加入房間")
-        join_code = st.text_input("輸入 6 碼房號", key="join_code").upper()
-        join_id = st.text_input("輸入你的玩家 ID", key="join_id")
-        if st.button("加入戰局"): join_room(join_code, join_id); st.rerun()
+        st.subheader("🔑 輸入房號加入")
+        join_code = st.text_input("輸入 6 碼私密房號", key="join_code").upper()
+        if st.button("加入指定戰局", use_container_width=True):
+            if player_id_input and join_code:
+                join_room(join_code, player_id_input)
+                st.rerun()
+            elif not player_id_input:
+                st.warning("請先在上方輸入玩家 ID！")
+            else:
+                st.warning("請輸入房號！")
+
+    st.divider()
+
+    # 3. 公開招募板 (防護機制：僅顯示等待中狀態的房間)
+    st.subheader("🟢 公開戰局招募板")
+    st.write("點擊下方列表即可直接參戰，免去輸入房號的麻煩：")
+    
+    if st.button("🔄 刷新招募板"):
+        st.rerun()
+
+    # 濾出允許加入的房間
+    available_rooms = {code: data for code, data in GLOBAL_ROOMS.items() if data["status"] == "lobby"}
+
+    if not available_rooms:
+        st.info("目前天下太平，沒有正在招募的公開房間。請自行創建一局！")
+    else:
+        for code, room_data in available_rooms.items():
+            player_count = len(room_data["players"])
+            
+            # 資安：去識別化顯示房主名稱
+            host_id = list(room_data["players"].keys())[0] if room_data["players"] else "空房"
+            masked_host = f"{host_id[:2]}***" if len(host_id) > 2 else host_id
+
+            col_info, col_btn = st.columns([3, 1])
+            with col_info:
+                st.markdown(f"**房間：`{code}`** | 👑 房主：{masked_host} | 👥 已加入：{player_count}/4 人")
+            with col_btn:
+                # 若滿員（實務上由陣營選擇管控，但可做基礎視覺防呆）
+                if player_count >= 4:
+                    st.button("房間已滿", disabled=True, key=f"full_{code}")
+                else:
+                    if st.button(f"⚔️ 點擊加入", key=f"join_btn_{code}", use_container_width=True):
+                        if player_id_input:
+                            join_room(code, player_id_input)
+                            st.rerun()
+                        else:
+                            st.warning("請先在最上方輸入玩家 ID！")
+            st.write("---")
 
 def render_room():
     room_code = st.session_state.current_room
@@ -300,7 +359,7 @@ def render_room():
         st.write("請選擇您的陣營：")
         
         st.write(f"👥 目前在房內的玩家人數：{len(room['players'])}")
-        if st.button("🔄 刷新大廳狀態"): st.rerun()
+        if st.button("🔄 刷新房間狀態"): st.rerun()
         
         cols = st.columns(4)
         for idx, faction in enumerate(VALID_FACTIONS):
@@ -327,7 +386,7 @@ def render_room():
         
         if has_locked:
             st.info("🔒 你已鎖定本回合的 3 名武將！等待其他對手中...")
-            if st.button("🔄 刷新狀態", type="primary"): st.rerun()
+            if st.button("🔄 刷新戰局狀態", type="primary"): st.rerun()
         else:
             st.write("📊 **軍情處：可用武將能力一覽表** (可點擊欄位標題排序)")
             deck_data = []
@@ -369,7 +428,7 @@ def render_room():
         if st.button("🎲 擲骰子並揭曉戰果 (伺服器端驗證)", type="primary"):
             resolve_round(room_code); st.rerun()
 
-    # --- 狀態 4：Resolution Result 戰報揭曉 (🛡️ 新增累積總分榜) ---
+    # --- 狀態 4：Resolution Result 戰報揭曉 ---
     elif room["status"] == "resolution_result":
         st.title("⚔️ 戰報揭曉")
         chosen_attr = room["last_chosen_attr"]
@@ -378,7 +437,6 @@ def render_room():
         results = room["last_round_results"]
         sorted_res = sorted(results.items(), key=lambda x: x[1]["rank"])
         
-        # 區塊 1：本回合戰情報導
         st.subheader("📌 本回合戰果")
         for pid, res in sorted_res:
             is_me = (pid == player_id)
@@ -387,7 +445,6 @@ def render_room():
             st.write(f"出戰武將：{', '.join(res['cards'])} ➔ **總和 {res['attr_total']}**")
             st.divider()
             
-        # 區塊 2：目前累積總分排名 (安全從伺服器記憶體抓取)
         st.subheader("📊 目前累積總分排名")
         current_scores = sorted(room["scores"].items(), key=lambda x: x[1], reverse=True)
         
@@ -400,7 +457,7 @@ def render_room():
             score_data.append({
                 "排名": f"{medal} 第 {rank + 1} 名",
                 "陣營": f"{faction}陣營 {marker}",
-                "總分": int(score) # 確保型別為整數，防禦顯示異常
+                "總分": int(score) 
             })
             
         st.dataframe(pd.DataFrame(score_data), hide_index=True, use_container_width=True)
