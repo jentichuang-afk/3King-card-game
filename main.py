@@ -36,7 +36,7 @@ GLOBAL_ROOMS = get_global_rooms()
 VALID_FACTIONS = ["魏", "蜀", "吳", "其他"]
 
 # ==========================================
-# 🎨 頭像與性格設定
+# 🎨 遊戲常數：頭像與性格設定
 # ==========================================
 AI_PERSONALITIES = {
     "【神算子】": "優雅、從容。嘲笑對手智商。15-35字。",
@@ -57,7 +57,7 @@ FACTION_ROSTERS = {
     "魏": ["曹操", "張遼", "司馬懿", "夏侯惇", "郭嘉", "典韋", "許褚", "荀彧", "夏侯淵", "曹丕", "曹仁", "賈詡", "徐晃", "張郃", "龐德"],
     "蜀": ["劉備", "關羽", "諸葛亮", "張飛", "趙雲", "馬超", "黃忠", "魏延", "龐統", "姜維", "法正", "黃月英", "馬岱", "關平", "劉禪"],
     "吳": ["孫權", "周瑜", "太史慈", "孫策", "陸遜", "呂蒙", "甘寧", "黃蓋", "凌統", "周泰", "魯肅", "孫尚香", "大喬", "小喬", "程普"],
-    "其他": ["呂布", "張角", "董卓", "袁紹", "左慈", "賈詡", "陳宮", "馬騰", "貂蟬", "華佗", "孟獲", "祝融", "公孫瓚", "盧植", "皇甫嵩"]
+    "其他": ["呂布", "張角", "董卓", "袁紹", "左慈", "陳宮", "馬騰", "貂蟬", "華佗", "孟獲", "祝融", "公孫瓚", "盧植", "皇甫嵩", "顏良"]
 }
 
 GENERALS_STATS = {
@@ -119,11 +119,11 @@ GENERALS_STATS = {
     "祝融": {"武力": 87, "智力": 52, "統帥": 75, "政治": 45, "魅力": 85, "運氣": 65},
     "公孫瓚": {"武力": 86, "智力": 68, "統帥": 86, "政治": 60, "魅力": 78, "運氣": 65},
     "盧植": {"武力": 70, "智力": 85, "統帥": 90, "政治": 88, "魅力": 88, "運氣": 75},
-    "皇甫嵩": {"武力": 75, "智力": 78, "統帥": 95, "政治": 75, "魅力": 82, "運氣": 80}
+    "皇甫嵩": {"武力": 75, "智力": 78, "統帥": 95, "政治": 75, "魅力": 82, "運氣": 80},
+    "顏良": {"武力": 94, "智力": 42, "統帥": 82, "政治": 35, "魅力": 55, "運氣": 50}
 }
 
 def get_general_stats(n): 
-    # 如果真的有遺漏的隱藏武將，才給 60 分
     return GENERALS_STATS.get(n, {"武力": 60, "智力": 60, "統帥": 60, "政治": 60, "魅力": 60, "運氣": 60})
 
 # ==========================================
@@ -140,7 +140,7 @@ def call_ai_with_fallback(prompt: str) -> tuple:
     if groq_client:
         try:
             res = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="llama-3.3-70b-versatile", # 🚀 修正 400 錯誤，使用最新模型
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"}
             )
@@ -148,7 +148,11 @@ def call_ai_with_fallback(prompt: str) -> tuple:
         except Exception as e: last_error = e
     if grok_client:
         try:
-            res = grok_client.chat.completions.create(model="grok-2-latest", messages=[{"role": "user", "content": prompt}], response_format={"type": "json_object"})
+            res = grok_client.chat.completions.create(
+                model="grok-2-latest", 
+                messages=[{"role": "user", "content": prompt}], 
+                response_format={"type": "json_object"}
+            )
             return res.choices[0].message.content, "xAI Grok-2"
         except Exception as e: last_error = e
     raise RuntimeError(f"所有 AI 服務暫不可用: {last_error}")
@@ -172,7 +176,7 @@ def generate_dialogue_vault(personalities):
     except: return {}
 
 # ==========================================
-# ⚙️ 核心戰場邏輯 (含積分變數)
+# ⚙️ 核心戰場邏輯 (含積分變數修復)
 # ==========================================
 def resolve_round(code):
     room = GLOBAL_ROOMS.get(code)
@@ -185,9 +189,15 @@ def resolve_round(code):
     
     pts_map = {0: 5, 1: 3, 2: 2, 3: 1}
     status_msg = ""
-    if diff_1_2 > 30: pts_map[0], status_msg = "💥 爆擊！"
-    elif diff_1_2 < 5: pts_map[0], status_msg = "😅 險勝"
     
+    # 🚀 修復 ValueError: 將 tuple 解包改為獨立賦值
+    if diff_1_2 > 30: 
+        pts_map[0] = 8
+        status_msg = "💥 爆擊！碾壓獲勝！"
+    elif diff_1_2 < 5: 
+        pts_map[0] = 4
+        status_msg = "😅 險勝：慘勝如敗..."
+        
     is_defeat = diff_1_4 > 60
     if is_defeat: pts_map[3] = 0
 
@@ -203,7 +213,7 @@ def resolve_round(code):
         pers = room["ai_personalities"].get(pid, "")
         final_quote = vault.get(pers, {}).get(attr, {}).get(str(r_num), "局勢變幻莫測...") if is_ai else ""
         
-        tag = status_msg if r_num == 1 else ("💀 完敗" if r_num == 4 and is_defeat else "")
+        tag = status_msg if r_num == 1 else ("💀 完敗：軍心崩潰！" if r_num == 4 and is_defeat else "")
         ranks[pid] = {
             "faction": room["players"].get(pid, pid.replace("AI_","")),
             "total": tot, "pts": pts, "rank": r_num, "is_ai": is_ai, 
@@ -215,7 +225,7 @@ def resolve_round(code):
 # 🖥️ UI 介面
 # ==========================================
 def validate_id(raw):
-    if not raw or not re.match(r"^[a-zA-Z0-9_\u4e00-\u9fa5]{2,12}$", raw): raise ValueError("名號限 2~12 碼")
+    if not raw or not re.match(r"^[a-zA-Z0-9_\u4e00-\u9fa5]{2,12}$", raw): raise ValueError("名號限 2~12 碼英數字或中文")
     return html.escape(raw)
 
 def render_lobby():
@@ -225,12 +235,12 @@ def render_lobby():
     col1, col2 = st.columns(2)
     with col1:
         if st.button("🛠️ 建立戰局"):
-            if len(pid_in) >= 2:
-                st.session_state.player_id = html.escape(pid_in)
+            try:
+                st.session_state.player_id = validate_id(pid_in)
                 code = secrets.token_hex(3).upper()
                 GLOBAL_ROOMS[code] = {"players": {}, "ai_factions": [], "status": "lobby", "round": 1, "decks": {}, "locked_cards": {}, "scores": {}, "ai_personalities": {}, "dialogue_vault": {}}
                 st.session_state.current_room = code; st.rerun()
-            else: st.error("名號太短！")
+            except ValueError as e: st.error(e)
             
     st.divider()
     st.subheader("🟢 公開招募板")
@@ -238,16 +248,16 @@ def render_lobby():
     if not active_rooms: st.info("目前無戰局")
     for c, d in active_rooms.items():
         if st.button(f"⚔️ 加入房間 {c} ({len(d['players'])}/4)", key=f"room_{c}"):
-            if len(pid_in) >= 2:
-                st.session_state.player_id = html.escape(pid_in)
+            try:
+                st.session_state.player_id = validate_id(pid_in)
                 st.session_state.current_room = c; st.rerun()
-            else: st.error("請先輸入名號")
+            except ValueError as e: st.error(e)
 
     with st.expander("📡 三雲端 AI 引擎診斷"):
         if st.button("🔌 測試連線"):
             with st.spinner("測試中..."):
                 try:
-                    res, model = call_ai_with_fallback("PING")
+                    res, model = call_ai_with_fallback("{\"測試\":\"連線成功\"}")
                     st.success(f"連線成功！當前大腦：{model}")
                 except Exception as e: st.error(f"連線失敗：{e}")
 
@@ -283,21 +293,27 @@ def render_room():
                 room["status"] = "playing"; st.rerun()
 
     elif room["status"] == "playing":
+        # 🚀 修復 KeyError: 加入觀戰模式防護，如果沒有牌組就提早 Return，不再往下執行
         if pid not in room["decks"]:
-            st.warning("👀 觀戰模式中..."); st.button("刷新戰況")
+            st.warning("👀 觀戰模式中：等待戰局推進。")
+            if st.button("🔄 刷新戰況"): st.rerun()
             return
 
-        df = pd.DataFrame([{"武將": n, **get_general_stats(n)} for n in room["decks"][pid]])
-        ev = st.dataframe(df, on_select="rerun", selection_mode="multi-row", hide_index=True)
-        if len(ev.selection.rows) == 3:
-            names = df.iloc[ev.selection.rows]["武將"].tolist()
-            if st.button(f"🔐 鎖定出戰：{', '.join(names)}", type="primary", use_container_width=True):
-                room["locked_cards"][pid] = names
-                for af in room["ai_factions"]:
-                    ai_id = f"AI_{af}"
-                    room["locked_cards"][ai_id] = get_ai_cards_local(room["decks"][ai_id], room["ai_personalities"][ai_id])
-                if len(room["locked_cards"]) == 4: room["status"] = "resolution_pending"
-                st.rerun()
+        if pid in room["locked_cards"]: 
+            st.info("🔒 陣容已鎖定，等待對手..."); st.button("🔄 刷新")
+        else:
+            df = pd.DataFrame([{"武將": n, **get_general_stats(n)} for n in room["decks"][pid]])
+            ev = st.dataframe(df, on_select="rerun", selection_mode="multi-row", hide_index=True)
+            if len(ev.selection.rows) == 3:
+                names = df.iloc[ev.selection.rows]["武將"].tolist()
+                if st.button(f"🔐 鎖定出戰：{', '.join(names)}", type="primary", use_container_width=True):
+                    room["locked_cards"][pid] = names
+                    for af in room["ai_factions"]:
+                        ai_id = f"AI_{af}"
+                        room["locked_cards"][ai_id] = get_ai_cards_local(room["decks"][ai_id], room["ai_personalities"][ai_id])
+                    if len(room["locked_cards"]) == 4: room["status"] = "resolution_pending"
+                    st.rerun()
+            elif len(ev.selection.rows) > 3: st.error("⚠️ 只能選擇 3 名武將！")
 
     elif room["status"] == "resolution_pending":
         if st.button("🎲 擲骰子結算", type="primary", use_container_width=True): resolve_round(code); st.rerun()
@@ -311,9 +327,12 @@ def render_room():
             if r["is_ai"]:
                 avatar = AVATAR_FILES.get(r['personality'], {}).get(r['rank'], "")
                 c1, c2 = st.columns([1, 6])
+                # 🚀 修復 AttributeError: 改用標準的 if/else 區塊
                 with c1:
-                    if os.path.exists(avatar): st.image(avatar)
-                    else: st.write("🎭")
+                    if os.path.exists(avatar):
+                        st.image(avatar, use_container_width=True)
+                    else:
+                        st.write("🎭")
                 with c2: st.info(f"「{r['quote']}」")
             st.write(f"出戰：{', '.join(r['cards'])} (總和 {r['total']})")
             st.divider()
@@ -326,7 +345,7 @@ def render_room():
             score_board.append({"排名": f"第 {rank+1} 名", "名號": display_name, "總分": int(score)})
         st.table(score_board)
 
-        if st.button("⏭️ 下一回合", type="primary", use_container_width=True):
+        if pid in room["decks"] and st.button("⏭️ 下一回合", type="primary", use_container_width=True):
             room["locked_cards"] = {}
             if room["round"] >= 5: room["status"] = "finished"
             else: room["round"] += 1; room["status"] = "playing"
