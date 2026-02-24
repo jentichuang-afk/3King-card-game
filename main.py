@@ -39,9 +39,9 @@ VALID_FACTIONS = ["魏", "蜀", "吳", "其他"]
 # 🎨 遊戲常數：頭像與性格設定
 # ==========================================
 AI_PERSONALITIES = {
-    "【神算子】": "優雅、從容。嘲笑對手智商。15-35字。",
-    "【霸道梟雄】": "狂傲、霸氣。動不動就威脅對手。15-35字。",
-    "【守護之盾】": "謙遜、死板。滿口仁義道德。15-35字。"
+    "【神算子】": "優雅、從容。極度自信，喜歡嘲笑對手的智商低。",
+    "【霸道梟雄】": "狂傲、霸氣。充滿壓迫感，動不動就威脅要砍對手腦袋。",
+    "【守護之盾】": "謙遜、死板。滿口仁義道德，就算輸了也要說大道理。"
 }
 
 AVATAR_FILES = {
@@ -51,7 +51,7 @@ AVATAR_FILES = {
 }
 
 # ==========================================
-# 🗄️ 完整武將數據 (百萬大軍歸位！)
+# 🗄️ 完整武將數據
 # ==========================================
 FACTION_ROSTERS = {
     "魏": ["曹操", "張遼", "司馬懿", "夏侯惇", "郭嘉", "典韋", "許褚", "荀彧", "夏侯淵", "曹丕", "曹仁", "賈詡", "徐晃", "張郃", "龐德"],
@@ -140,7 +140,7 @@ def call_ai_with_fallback(prompt: str) -> tuple:
     if groq_client:
         try:
             res = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile", # 🚀 修正 400 錯誤，使用最新模型
+                model="llama-3.3-70b-versatile",
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"}
             )
@@ -166,17 +166,37 @@ def get_ai_cards_local(available, personality):
 
 def generate_dialogue_vault(personalities):
     if not personalities: return {}
-    prompt = f"""你是三國對話引擎。為性格：{personalities} 撰寫劇本。
-    需包含 6 種屬性與 1-4 名的對話。JSON 格式。"""
+    pers_str = ", ".join(personalities)
+    
+    # 🚀 重點修復：提供嚴格的 JSON 模板，防止 AI 亂生格式導致找不到台詞
+    prompt = f"""你是頂尖的三國遊戲編劇。請為以下 AI 性格撰寫專屬台詞：{pers_str}
+    情境包含 6 種屬性（武力, 智力, 統帥, 政治, 魅力, 運氣），每種屬性下有 4 種名次反應(1, 2, 3, 4)。
+    第 1 名要極度囂張，第 4 名要崩潰哀嚎。每句台詞 15-35 字。
+    
+    【極度重要】請務必嚴格輸出為 JSON 格式，且「鍵值名稱」必須與以下範例完全一致（包含括號）：
+    {{
+        "{personalities[0]}": {{
+            "武力": {{"1": "台詞...", "2": "台詞...", "3": "台詞...", "4": "台詞..."}},
+            "智力": {{"1": "台詞...", "2": "台詞...", "3": "台詞...", "4": "台詞..."}},
+            "統帥": {{"1": "台詞...", "2": "台詞...", "3": "台詞...", "4": "台詞..."}},
+            "政治": {{"1": "台詞...", "2": "台詞...", "3": "台詞...", "4": "台詞..."}},
+            "魅力": {{"1": "台詞...", "2": "台詞...", "3": "台詞...", "4": "台詞..."}},
+            "運氣": {{"1": "台詞...", "2": "台詞...", "3": "台詞...", "4": "台詞..."}}
+        }}
+    }}
+    請確保所有給定的性格都在 JSON 中有對應的完整資料。
+    """
     try:
         raw, _ = call_ai_with_fallback(prompt)
         if "```json" in raw: raw = raw.split("```json")[1].split("```")[0].strip()
         elif "```" in raw: raw = raw.split("```")[1].strip()
         return json.loads(raw)
-    except: return {}
+    except Exception as e: 
+        logging.error(f"劇本生成解析失敗: {e}")
+        return {}
 
 # ==========================================
-# ⚙️ 核心戰場邏輯 (含積分變數修復)
+# ⚙️ 核心戰場邏輯
 # ==========================================
 def resolve_round(code):
     room = GLOBAL_ROOMS.get(code)
@@ -190,7 +210,6 @@ def resolve_round(code):
     pts_map = {0: 5, 1: 3, 2: 2, 3: 1}
     status_msg = ""
     
-    # 🚀 修復 ValueError: 將 tuple 解包改為獨立賦值
     if diff_1_2 > 30: 
         pts_map[0] = 8
         status_msg = "💥 爆擊！碾壓獲勝！"
@@ -211,7 +230,10 @@ def resolve_round(code):
         
         is_ai = pid.startswith("AI_")
         pers = room["ai_personalities"].get(pid, "")
-        final_quote = vault.get(pers, {}).get(attr, {}).get(str(r_num), "局勢變幻莫測...") if is_ai else ""
+        
+        # 如果因為任何原因 AI 找不到台詞，會顯示這句除錯提示，確保不再不明不白地顯示局勢變幻莫測
+        fallback_quote = f"（系統提示：{pers} 正在思考如何開嗆，請稍候...）"
+        final_quote = vault.get(pers, {}).get(attr, {}).get(str(r_num), fallback_quote) if is_ai else ""
         
         tag = status_msg if r_num == 1 else ("💀 完敗：軍心崩潰！" if r_num == 4 and is_defeat else "")
         ranks[pid] = {
@@ -277,7 +299,7 @@ def render_room():
                 room["players"][pid] = f; st.rerun()
         
         if pid in room["players"] and st.button("🚀 開始遊戲", type="primary", use_container_width=True):
-            with st.spinner("撰寫劇本中..."):
+            with st.spinner("撰寫劇本中... (此步驟呼叫AI可能需數秒)"):
                 taken_f = list(room["players"].values())
                 room["ai_factions"] = [f for f in VALID_FACTIONS if f not in taken_f]
                 for p_id, faction in room["players"].items():
@@ -293,7 +315,6 @@ def render_room():
                 room["status"] = "playing"; st.rerun()
 
     elif room["status"] == "playing":
-        # 🚀 修復 KeyError: 加入觀戰模式防護，如果沒有牌組就提早 Return，不再往下執行
         if pid not in room["decks"]:
             st.warning("👀 觀戰模式中：等待戰局推進。")
             if st.button("🔄 刷新戰況"): st.rerun()
@@ -321,13 +342,16 @@ def render_room():
     elif room["status"] == "resolution_result":
         st.header(f"🎲 比拼屬性：【{room['last_attr']}】")
         for p, r in sorted(room["results"].items(), key=lambda x: x[1]['rank']):
+            bg = "🟢" if p == pid else "⚪"
             name = f"{r['personality']} ({r['faction']})" if r["is_ai"] else f"主公 {p} ({r['faction']})"
-            st.write(f"#### 第 {r['rank']} 名: {name} (+{r['pts']}分) **{r['tag']}**")
+            
+            # 🚀 修復 UI 顯示問題：當 tag 為空時，不再印出多餘的 ****
+            tag_display = f" **{r['tag']}**" if r['tag'] else ""
+            st.write(f"#### {bg} 第 {r['rank']} 名: {name} (+{r['pts']}分){tag_display}")
             
             if r["is_ai"]:
                 avatar = AVATAR_FILES.get(r['personality'], {}).get(r['rank'], "")
                 c1, c2 = st.columns([1, 6])
-                # 🚀 修復 AttributeError: 改用標準的 if/else 區塊
                 with c1:
                     if os.path.exists(avatar):
                         st.image(avatar, use_container_width=True)
