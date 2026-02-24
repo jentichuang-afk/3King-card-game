@@ -12,14 +12,12 @@ import pandas as pd
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [SECURE_LOG] - %(message)s')
 
 # --- 1. 個人狀態隔離 (Session State) ---
-# 確保每個瀏覽器分頁(玩家)都有獨立的 ID 與當前所在房間記錄
 if 'current_room' not in st.session_state:
     st.session_state.current_room = None
 if 'player_id' not in st.session_state:
     st.session_state.player_id = None
 
 # --- 2. 伺服器全域記憶體 (Global State) ---
-# 修正多人連線問題：使用 @st.cache_resource 建立跨分頁、跨玩家共享的房間資料庫
 @st.cache_resource
 def get_global_rooms():
     return {}
@@ -55,7 +53,6 @@ GENERALS_STATS = {
     "徐晃": {"武力": 90, "智力": 74, "統帥": 88, "政治": 48, "魅力": 71, "運氣": 70},
     "張郃": {"武力": 89, "智力": 69, "統帥": 90, "政治": 57, "魅力": 71, "運氣": 60},
     "龐德": {"武力": 94, "智力": 68, "統帥": 80, "政治": 42, "魅力": 70, "運氣": 40},
-
     # --- 蜀國 ---
     "劉備": {"武力": 73, "智力": 74, "統帥": 75, "政治": 78, "魅力": 99, "運氣": 95},
     "關羽": {"武力": 97, "智力": 75, "統帥": 95, "政治": 62, "魅力": 93, "運氣": 80},
@@ -72,7 +69,6 @@ GENERALS_STATS = {
     "馬岱": {"武力": 84, "智力": 55, "統帥": 75, "政治": 42, "魅力": 68, "運氣": 70},
     "關平": {"武力": 82, "智力": 68, "統帥": 77, "政治": 60, "魅力": 75, "運氣": 60},
     "劉禪": {"武力": 5, "智力": 9, "統帥": 3, "政治": 12, "魅力": 56, "運氣": 100},
-
     # --- 吳國 ---
     "孫權": {"武力": 67, "智力": 80, "統帥": 76, "政治": 89, "魅力": 95, "運氣": 88},
     "周瑜": {"武力": 71, "智力": 96, "統帥": 97, "政治": 86, "魅力": 93, "運氣": 75},
@@ -89,7 +85,6 @@ GENERALS_STATS = {
     "大喬": {"武力": 11, "智力": 73, "統帥": 26, "政治": 60, "魅力": 92, "運氣": 60},
     "小喬": {"武力": 12, "智力": 74, "統帥": 28, "政治": 62, "魅力": 93, "運氣": 60},
     "程普": {"武力": 79, "智力": 74, "統帥": 84, "政治": 65, "魅力": 75, "運氣": 70},
-
     # --- 其他 ---
     "呂布": {"武力": 100, "智力": 26, "統帥": 87, "政治": 13, "魅力": 40, "運氣": 30},
     "董卓": {"武力": 87, "智力": 69, "統帥": 84, "政治": 59, "魅力": 35, "運氣": 40},
@@ -304,7 +299,6 @@ def render_room():
         st.success(f"歡迎參戰，主公 {player_id}！")
         st.write("請選擇您的陣營：")
         
-        # 顯示目前房內有誰 (確保即時更新)
         st.write(f"👥 目前在房內的玩家人數：{len(room['players'])}")
         if st.button("🔄 刷新大廳狀態"): st.rerun()
         
@@ -375,7 +369,7 @@ def render_room():
         if st.button("🎲 擲骰子並揭曉戰果 (伺服器端驗證)", type="primary"):
             resolve_round(room_code); st.rerun()
 
-    # --- 狀態 4：Resolution Result 戰報揭曉 ---
+    # --- 狀態 4：Resolution Result 戰報揭曉 (🛡️ 新增累積總分榜) ---
     elif room["status"] == "resolution_result":
         st.title("⚔️ 戰報揭曉")
         chosen_attr = room["last_chosen_attr"]
@@ -384,6 +378,8 @@ def render_room():
         results = room["last_round_results"]
         sorted_res = sorted(results.items(), key=lambda x: x[1]["rank"])
         
+        # 區塊 1：本回合戰情報導
+        st.subheader("📌 本回合戰果")
         for pid, res in sorted_res:
             is_me = (pid == player_id)
             bg_color = "🟢" if is_me else "⚪"
@@ -391,6 +387,25 @@ def render_room():
             st.write(f"出戰武將：{', '.join(res['cards'])} ➔ **總和 {res['attr_total']}**")
             st.divider()
             
+        # 區塊 2：目前累積總分排名 (安全從伺服器記憶體抓取)
+        st.subheader("📊 目前累積總分排名")
+        current_scores = sorted(room["scores"].items(), key=lambda x: x[1], reverse=True)
+        
+        score_data = []
+        for rank, (pid, score) in enumerate(current_scores):
+            faction = room["players"].get(pid, pid.replace("AI_", ""))
+            medal = "🥇" if rank == 0 else "🥈" if rank == 1 else "🥉" if rank == 2 else "🎖️"
+            is_me = (pid == player_id)
+            marker = "🟢 (你)" if is_me else ""
+            score_data.append({
+                "排名": f"{medal} 第 {rank + 1} 名",
+                "陣營": f"{faction}陣營 {marker}",
+                "總分": int(score) # 確保型別為整數，防禦顯示異常
+            })
+            
+        st.dataframe(pd.DataFrame(score_data), hide_index=True, use_container_width=True)
+        st.divider()
+        
         if st.button("⏭️ 進入下一回合", type="primary", use_container_width=True):
             next_round_or_finish(room_code); st.rerun()
 
