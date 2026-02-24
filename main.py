@@ -273,16 +273,13 @@ def next_round_or_finish(room_code: str):
 # ==========================================
 
 def render_lobby():
-    """重新設計的安全大廳視圖，包含全域 ID 輸入與招募板"""
     st.title("⚔️ 三國之巔：大廳")
     
-    # 1. 全域玩家身分設定
     st.markdown("### 👤 第一步：確認主公名號")
     player_id_input = st.text_input("請輸入你的玩家 ID (供本局連線使用)：", key="lobby_player_id", help="限 3~12 碼英數字")
     
     st.divider()
 
-    # 2. 建立與私密加入區塊
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("🛠️ 建立專屬房間")
@@ -307,14 +304,12 @@ def render_lobby():
 
     st.divider()
 
-    # 3. 公開招募板 (防護機制：僅顯示等待中狀態的房間)
     st.subheader("🟢 公開戰局招募板")
     st.write("點擊下方列表即可直接參戰，免去輸入房號的麻煩：")
     
     if st.button("🔄 刷新招募板"):
         st.rerun()
 
-    # 濾出允許加入的房間
     available_rooms = {code: data for code, data in GLOBAL_ROOMS.items() if data["status"] == "lobby"}
 
     if not available_rooms:
@@ -323,7 +318,6 @@ def render_lobby():
         for code, room_data in available_rooms.items():
             player_count = len(room_data["players"])
             
-            # 資安：去識別化顯示房主名稱
             host_id = list(room_data["players"].keys())[0] if room_data["players"] else "空房"
             masked_host = f"{host_id[:2]}***" if len(host_id) > 2 else host_id
 
@@ -331,7 +325,6 @@ def render_lobby():
             with col_info:
                 st.markdown(f"**房間：`{code}`** | 👑 房主：{masked_host} | 👥 已加入：{player_count}/4 人")
             with col_btn:
-                # 若滿員（實務上由陣營選擇管控，但可做基礎視覺防呆）
                 if player_count >= 4:
                     st.button("房間已滿", disabled=True, key=f"full_{code}")
                 else:
@@ -376,7 +369,7 @@ def render_room():
         if st.button("🚀 所有人準備完畢，開始遊戲！", type="primary", disabled=len(room["players"])==0):
             fill_ai_factions_and_start(room_code); st.rerun()
 
-    # --- 狀態 2：Playing 暗選出牌階段 ---
+    # --- 狀態 2：Playing 暗選出牌階段 (🛡️ 更新：互動式表格選取) ---
     elif room["status"] == "playing":
         player_faction = room['players'].get(player_id)
         player_deck = room['decks'].get(player_id, [])
@@ -388,7 +381,7 @@ def render_room():
             st.info("🔒 你已鎖定本回合的 3 名武將！等待其他對手中...")
             if st.button("🔄 刷新戰局狀態", type="primary"): st.rerun()
         else:
-            st.write("📊 **軍情處：可用武將能力一覽表** (可點擊欄位標題排序)")
+            st.write("📊 **軍情處：請直接勾選下方表格左側的核取方塊，點選 3 名出戰武將** (可點擊欄位標題排序)")
             deck_data = []
             for name in player_deck:
                 stats = get_general_stats(name)
@@ -399,14 +392,30 @@ def render_room():
                 })
             
             df = pd.DataFrame(deck_data)
-            st.dataframe(df, hide_index=True, use_container_width=True)
+            
+            # 使用最新版 Streamlit 的 dataframe 列選取功能
+            selection_event = st.dataframe(
+                df, 
+                hide_index=True, 
+                use_container_width=True,
+                on_select="rerun",           # 啟動互動事件：勾選後重新渲染畫面
+                selection_mode="multi-row"   # 允許選擇多列
+            )
+            
+            # 取得玩家勾選的列索引，並反查對應的武將名稱
+            selected_indices = selection_event.selection.rows
+            selected = df.iloc[selected_indices]["武將名"].tolist()
 
             st.divider()
-            selected = st.multiselect("👇 請從上方名單點選 3 名武將出戰：", options=player_deck, max_selections=3)
             
+            # 顯示選定的武將與防呆機制
             if selected:
-                st.write("⚔️ **目前選定出戰陣容：**")
-                cols = st.columns(len(selected))
+                if len(selected) > 3:
+                    st.error(f"⚠️ 只能選擇 3 名武將！您目前選擇了 {len(selected)} 名，請取消勾選多餘的武將。")
+                else:
+                    st.write(f"⚔️ **目前選定出戰陣容 ({len(selected)}/3)：**")
+                
+                cols = st.columns(max(len(selected), 1))
                 for i, name in enumerate(selected):
                     stats = get_general_stats(name)
                     with cols[i]:
@@ -418,6 +427,8 @@ def render_room():
             if st.button("🔐 鎖定出戰陣容 (點擊後不可更改)", type="primary"):
                 if len(selected) == 3:
                     lock_in_cards(room_code, player_id, selected); st.rerun()
+                elif len(selected) > 3:
+                    st.warning("主公，您選了太多武將，請減少至精確的 3 名！")
                 else:
                     st.warning("主公，必須精確點齊 3 名武將方可出征！")
 
