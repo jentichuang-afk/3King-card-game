@@ -11,15 +11,20 @@ import pandas as pd
 # 設定安全日誌：確保不記錄任何 PII (如玩家明文 ID 或真實 IP)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [SECURE_LOG] - %(message)s')
 
-# 初始化客戶端 Session State (確保單一瀏覽器視窗的狀態隔離)
+# --- 1. 個人狀態隔離 (Session State) ---
+# 確保每個瀏覽器分頁(玩家)都有獨立的 ID 與當前所在房間記錄
 if 'current_room' not in st.session_state:
     st.session_state.current_room = None
 if 'player_id' not in st.session_state:
     st.session_state.player_id = None
 
-# 模擬伺服器端的全域房間狀態庫 (實務上應使用 Redis 或資料庫)
-if 'global_rooms' not in st.session_state:
-    st.session_state.global_rooms = {}
+# --- 2. 伺服器全域記憶體 (Global State) ---
+# 修正多人連線問題：使用 @st.cache_resource 建立跨分頁、跨玩家共享的房間資料庫
+@st.cache_resource
+def get_global_rooms():
+    return {}
+
+GLOBAL_ROOMS = get_global_rooms()
 
 VALID_FACTIONS = ["魏", "蜀", "吳", "其他"]
 
@@ -33,7 +38,6 @@ FACTION_ROSTERS = {
     "其他": ["呂布", "董卓", "貂蟬", "袁紹", "華佗", "顏良", "文醜", "左慈", "公孫瓚", "袁術", "孟獲", "祝融", "張角", "盧植", "皇甫嵩"]
 }
 
-# 參考經典三國遊戲設定的絕對數值庫 (伺服器端鎖死，防竄改)
 GENERALS_STATS = {
     # --- 魏國 ---
     "曹操": {"武力": 72, "智力": 91, "統帥": 96, "政治": 94, "魅力": 96, "運氣": 85},
@@ -105,10 +109,6 @@ GENERALS_STATS = {
 }
 
 def get_general_stats(name: str):
-    """
-    伺服器端絕對防禦查表法 (Server-Side Dictionary Lookup)
-    若玩家試圖傳送不存在的武將名稱引發崩潰，回傳基礎預設值作為 Fail-Safe。
-    """
     default_stats = {"武力": 50, "智力": 50, "統帥": 50, "政治": 50, "魅力": 50, "運氣": 50}
     return GENERALS_STATS.get(name, default_stats)
 
@@ -125,8 +125,8 @@ def validate_and_sanitize_id(raw_id: str) -> str:
     return html.escape(raw_id)
 
 def init_room_state(room_code: str):
-    if room_code not in st.session_state.global_rooms:
-        st.session_state.global_rooms[room_code] = {
+    if room_code not in GLOBAL_ROOMS:
+        GLOBAL_ROOMS[room_code] = {
             "players": {},         
             "ai_factions": [],     
             "status": "lobby",     
@@ -153,8 +153,8 @@ def join_room(room_code: str, player_id: str):
     try:
         safe_id = validate_and_sanitize_id(player_id)
         if not re.match(r"^[A-F0-9]{6}$", room_code): raise ValueError("無效的房號格式。")
-        if room_code not in st.session_state.global_rooms: raise ValueError("找不到該房間。")
-        if st.session_state.global_rooms[room_code]["status"] != "lobby": raise ValueError("房間已開戰。")
+        if room_code not in GLOBAL_ROOMS: raise ValueError("找不到該房間。")
+        if GLOBAL_ROOMS[room_code]["status"] != "lobby": raise ValueError("房間已開戰。")
             
         st.session_state.current_room = room_code
         st.session_state.player_id = safe_id
@@ -163,7 +163,7 @@ def join_room(room_code: str, player_id: str):
         st.error(str(e))
 
 def assign_faction(room_code: str, player_id: str, requested_faction: str) -> bool:
-    room = st.session_state.global_rooms.get(room_code)
+    room = GLOBAL_ROOMS.get(room_code)
     if not room or room["status"] != "lobby": return False
     if requested_faction not in VALID_FACTIONS: return False
     taken = list(room["players"].values()) + room["ai_factions"]
@@ -175,7 +175,7 @@ def assign_faction(room_code: str, player_id: str, requested_faction: str) -> bo
 # ⚔️ 遊戲核心邏輯 (伺服器端狀態權威)
 # ==========================================
 def fill_ai_factions_and_start(room_code: str):
-    room = st.session_state.global_rooms.get(room_code)
+    room = GLOBAL_ROOMS.get(room_code)
     if not room or room["status"] != "lobby": return
 
     taken_factions = list(room["players"].values())
@@ -194,7 +194,7 @@ def fill_ai_factions_and_start(room_code: str):
     logging.info(f"Room {room_code} locked. Decks dealt safely.")
 
 def lock_in_cards(room_code: str, player_id: str, selected_cards: list):
-    room = st.session_state.global_rooms.get(room_code)
+    room = GLOBAL_ROOMS.get(room_code)
     if not room or room["status"] != "playing": return
     
     if len(selected_cards) != 3:
@@ -210,7 +210,7 @@ def lock_in_cards(room_code: str, player_id: str, selected_cards: list):
     room["locked_cards"][player_id] = selected_cards
     logging.info(f"Player {player_id[:2]}*** locked in 3 cards securely.")
     
-    import random # 用於 AI 隨機選牌
+    import random
     for ai_fac in room["ai_factions"]:
         ai_id = f"AI_{ai_fac}"
         if ai_id not in room["locked_cards"]:
@@ -222,7 +222,7 @@ def lock_in_cards(room_code: str, player_id: str, selected_cards: list):
         room["status"] = "resolution_pending" 
 
 def resolve_round(room_code: str):
-    room = st.session_state.global_rooms.get(room_code)
+    room = GLOBAL_ROOMS.get(room_code)
     if not room or room["status"] != "resolution_pending": return
 
     secure_rng = secrets.SystemRandom()
@@ -263,7 +263,7 @@ def resolve_round(room_code: str):
     logging.info(f"Room {room_code} Round {room['round']} resolved. Attr: {chosen_attr}")
 
 def next_round_or_finish(room_code: str):
-    room = st.session_state.global_rooms.get(room_code)
+    room = GLOBAL_ROOMS.get(room_code)
     if not room or room["status"] != "resolution_result": return
     
     room["locked_cards"] = {}
@@ -292,7 +292,7 @@ def render_lobby():
 def render_room():
     room_code = st.session_state.current_room
     player_id = st.session_state.player_id
-    room = st.session_state.global_rooms.get(room_code)
+    room = GLOBAL_ROOMS.get(room_code)
     
     if not room:
         st.error("房間狀態異常，請重新加入。"); st.session_state.current_room = None; st.rerun()
@@ -303,6 +303,11 @@ def render_room():
     if room["status"] == "lobby":
         st.success(f"歡迎參戰，主公 {player_id}！")
         st.write("請選擇您的陣營：")
+        
+        # 顯示目前房內有誰 (確保即時更新)
+        st.write(f"👥 目前在房內的玩家人數：{len(room['players'])}")
+        if st.button("🔄 刷新大廳狀態"): st.rerun()
+        
         cols = st.columns(4)
         for idx, faction in enumerate(VALID_FACTIONS):
             is_taken = faction in room["players"].values()
