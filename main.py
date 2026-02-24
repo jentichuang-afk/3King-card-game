@@ -41,12 +41,12 @@ GLOBAL_ROOMS = get_global_rooms()
 VALID_FACTIONS = ["魏", "蜀", "吳", "其他"]
 
 # ==========================================
-# 🤖 智慧型動態模型備援機制 (Dynamic Fallback)
+# 🤖 智慧型動態模型備援機制
 # ==========================================
 MODEL_HIERARCHY = [
-    "gemini-2.5-flash",       
     "gemini-3.0-flash",       
     "gemini-2.5-flash-lite",  
+    "gemini-2.5-flash",       
     "gemini-1.5-flash"        
 ]
 
@@ -61,7 +61,7 @@ def call_gemini_with_fallback(prompt: str) -> tuple:
             logging.warning(f"[AI Routing] {model_name} 失敗，切換中...")
             last_error = e
             continue 
-    raise RuntimeError(f"所有備援模型皆已耗盡或出錯。最後錯誤: {last_error}")
+    raise RuntimeError(f"所有備援皆耗盡。錯誤: {last_error}")
 
 # ==========================================
 # 🗄️ 靜態遊戲資料與 AI 性格設定
@@ -153,80 +153,61 @@ def check_api_status():
         return False, f"連線失敗，錯誤原因：{str(e)}"
 
 # ==========================================
-# 🧠 AI 決策引擎 (階段1: 純選牌，極速執行)
+# 🧠 AI 本地演算法 (0 延遲，不消耗 API)
 # ==========================================
-def get_ai_cards(ai_id: str, available_cards: list, personality_name: str) -> list:
-    fallback_cards = random.sample(available_cards, 3)
-    if not ai_client: return fallback_cards
+def get_ai_cards_local(available_cards: list, personality_name: str) -> list:
+    card_stats = [(name, get_general_stats(name)) for name in available_cards]
+    if "神算子" in personality_name:
+        card_stats.sort(key=lambda x: sum(x[1].values()), reverse=True)
+    elif "霸道梟雄" in personality_name:
+        card_stats.sort(key=lambda x: x[1]["武力"] + x[1]["統帥"], reverse=True)
+    elif "守護之盾" in personality_name:
+        card_stats.sort(key=lambda x: x[1]["政治"] + x[1]["魅力"] + x[1]["運氣"], reverse=True)
+    else:
+        random.shuffle(card_stats)
+    return [card[0] for card in card_stats[:3]]
 
-    personality_desc = AI_PERSONALITIES.get(personality_name, "")
+# ==========================================
+# 🧠 劇本金庫生成器 (全場只消耗 1 次 API，極大化利用 TPM)
+# ==========================================
+def generate_dialogue_vault(personalities: list) -> dict:
+    """在開局時一次性生成所有性格、屬性、名次的戰後台詞"""
+    if not ai_client: return {}
+    
+    personalities_str = ", ".join(personalities)
     prompt = f"""
-    你是三國對戰AI。性格：{personality_name} - {personality_desc}。
-    你手上剩餘武將：{available_cards}。
-    請根據性格，挑選「剛好 3 名」武將。
-    嚴格回傳 JSON 格式：{{"selected_cards": ["武將A", "武將B", "武將C"]}}
-    """
-    try:
-        raw_text, _ = call_gemini_with_fallback(prompt)
-        if raw_text.startswith("```json"): raw_text = raw_text[7:-3].strip()
-        elif raw_text.startswith("```"): raw_text = raw_text[3:-3].strip()
-        data = json.loads(raw_text)
-        selected = data.get("selected_cards", [])
-        if len(selected) == 3 and all(card in available_cards for card in selected): return selected
-    except Exception: pass
-    return fallback_cards
-
-# ==========================================
-# 🧠 AI 實況台詞引擎 (階段2: 擲骰後，根據屬性與名次發言)
-# ==========================================
-def generate_battle_reactions(ai_data_list: list, attribute: str) -> dict:
-    """批次處理所有 AI 的戰後台詞，根據屬性與名次量身打造"""
-    # 防呆預設對話
-    fallbacks = {
-        ai["id"]: f"【{attribute}】判定完畢，吾軍位列第 {ai['rank']} 名！" for ai in ai_data_list
-    }
-    if not ai_client or not ai_data_list: return fallbacks
-
-    ai_info_str = "\n".join([
-        f"- ID: {ai['id']}, 性格: {ai['personality']}, 出戰武將: {ai['cards']}, 最終名次: 第 {ai['rank']} 名"
-        for ai in ai_data_list
-    ])
-
-    prompt = f"""
-    這是一場三國卡牌對戰。本回合剛剛結算完畢！比拼的屬性是：【{attribute}】。
-    情境設定：
-    - 比「武力」：代表發生了猛將單挑、衝鋒陷陣。
-    - 比「智力」：代表使用了錦囊妙計、陣法識破、火攻水淹。
-    - 比「統帥」：代表排兵佈陣、軍心士氣、全軍突擊。
-    - 比「政治」：代表後勤補給、朝堂施壓、兵不血刃。
-    - 比「魅力」：代表招降納叛、激勵軍心、名望壓制。
-    - 比「運氣」：代表天象大變、意外事件、東風相助。
-
-    請為以下 AI 玩家撰寫戰後台詞（每句限 30 字以內）。
-    台詞必須強烈扣緊本次的【{attribute}】情境，並且符合他們的【最終名次】（第1名極度囂張，墊底則要抱怨、崩潰或找藉口），同時展現其【性格】。
-
-    AI 玩家實況：
-    {ai_info_str}
-
-    請嚴格回傳包含所有 AI 台詞的 JSON 格式：
+    你是頂尖的三國遊戲編劇。請為參與本局遊戲的 AI 性格：【{personalities_str}】 預先寫好一份完整的「台詞劇本金庫」。
+    
+    情境要求：
+    包含 6 種比拼屬性：武力(單挑衝鋒)、智力(計謀看破)、統帥(排兵布陣)、政治(朝堂後勤)、魅力(激勵人心)、運氣(天象變換)。
+    每種屬性下，必須為該性格寫出 4 種名次反應：
+    "1": 第 1 名的囂張得意
+    "2": 第 2 名的不甘示弱
+    "3": 第 3 名的尋找藉口
+    "4": 第 4 名的徹底崩潰與抱怨
+    每句台詞限 15 字以內。
+    
+    請嚴格回傳 JSON，格式如下：
     {{
-      "{ai_data_list[0]['id']}": "台詞...",
-      ...
+      "性格名稱 (例如 【神算子】)": {{
+         "武力": {{"1": "...", "2": "...", "3": "...", "4": "..."}},
+         "智力": {{"1": "...", "2": "...", "3": "...", "4": "..."}},
+         "統帥": {{"1": "...", "2": "...", "3": "...", "4": "..."}},
+         "政治": {{"1": "...", "2": "...", "3": "...", "4": "..."}},
+         "魅力": {{"1": "...", "2": "...", "3": "...", "4": "..."}},
+         "運氣": {{"1": "...", "2": "...", "3": "...", "4": "..."}}
+      }},
+      "其他性格...": {{...}}
     }}
     """
-
     try:
         raw_text, _ = call_gemini_with_fallback(prompt)
         if raw_text.startswith("```json"): raw_text = raw_text[7:-3].strip()
         elif raw_text.startswith("```"): raw_text = raw_text[3:-3].strip()
-        result_dict = json.loads(raw_text)
-        # 合併回傳結果，若有遺漏則補上防呆台詞
-        for ai in ai_data_list:
-            if ai["id"] not in result_dict: result_dict[ai["id"]] = fallbacks[ai["id"]]
-        return result_dict
+        return json.loads(raw_text)
     except Exception as e:
-        logging.error(f"[AI Reaction] 台詞生成失敗: {e}")
-        return fallbacks
+        logging.error(f"[Dialogue Vault] 劇本生成失敗: {e}")
+        return {}
 
 # ==========================================
 # ⚙️ 核心系統功能 (大廳、房間、戰鬥)
@@ -241,7 +222,7 @@ def init_room(code: str):
         GLOBAL_ROOMS[code] = {
             "players": {}, "ai_factions": [], "status": "lobby", "round": 1,
             "decks": {}, "locked_cards": {}, "scores": {}, "last_attr": "", "results": {},
-            "ai_personalities": {}
+            "ai_personalities": {}, "dialogue_vault": {} # ✨ 新增劇本金庫
         }
 
 def assign_faction(code: str, pid: str, faction: str):
@@ -260,39 +241,40 @@ def start_game(code: str):
     available_personalities = list(AI_PERSONALITIES.keys())
     random.shuffle(available_personalities)
     
+    ai_personality_list = []
     for af in room["ai_factions"]:
         ai_id = f"AI_{af}"
         room["decks"][ai_id], room["scores"][ai_id] = list(FACTION_ROSTERS[af]), 0
-        room["ai_personalities"][ai_id] = available_personalities.pop() if available_personalities else "【神算子】"
+        pers = available_personalities.pop() if available_personalities else "【神算子】"
+        room["ai_personalities"][ai_id] = pers
+        ai_personality_list.append(pers)
         
+    # ✨ 核心重構：開局時耗費唯一 1 次 API 額度，載滿大卡車！
+    room["dialogue_vault"] = generate_dialogue_vault(ai_personality_list)
     room["status"] = "playing"
 
 def lock_cards(code: str, pid: str, cards: list):
     room = GLOBAL_ROOMS.get(code)
     room["locked_cards"][pid] = cards
     
-    # 階段1：只讓 AI 快速選牌，不浪費時間生成台詞
     for af in room["ai_factions"]:
         ai_id = f"AI_{af}"
         if ai_id not in room["locked_cards"]:
             ai_deck = room["decks"][ai_id]
             personality = room["ai_personalities"][ai_id]
-            room["locked_cards"][ai_id] = get_ai_cards(ai_id, ai_deck, personality)
+            room["locked_cards"][ai_id] = get_ai_cards_local(ai_deck, personality)
             
     if len(room["locked_cards"]) == 4: 
         room["status"] = "resolution_pending"
 
 def resolve_round(code: str):
     room = GLOBAL_ROOMS.get(code)
-    # 1. 擲骰子決定屬性
     attr = secrets.SystemRandom().choice(["武力", "智力", "統帥", "政治", "魅力", "運氣"])
-    
-    # 2. 計算總分與排名
     totals = {pid: sum(get_general_stats(c)[attr] for c in cards) for pid, cards in room["locked_cards"].items()}
     sorted_p = sorted(totals.items(), key=lambda x: x[1], reverse=True)
     
     ranks, cur_r = {}, 0
-    ai_batch_data = [] # 準備發送給 AI 的實況資料
+    vault = room.get("dialogue_vault", {}) # 取出金庫
     
     for i, (pid, tot) in enumerate(sorted_p):
         if i > 0 and tot < sorted_p[i-1][1]: cur_r = i
@@ -303,24 +285,18 @@ def resolve_round(code: str):
         
         faction_name = room["players"].get(pid, pid.replace("AI_",""))
         is_ai = pid.startswith("AI_")
+        personality = room["ai_personalities"].get(pid, "")
         
+        # ✨ 從金庫提取台詞 (0 API 消耗)
+        final_quote = "勝敗乃兵家常事。"
+        if is_ai and vault and personality in vault:
+            final_quote = vault[personality].get(attr, {}).get(str(rank_num), "這局勢出乎我意料...")
+            
         ranks[pid] = {
             "faction": faction_name, "cards": room["locked_cards"][pid], 
             "total": tot, "pts": pts, "rank": rank_num, "is_ai": is_ai,
-            "personality": room["ai_personalities"].get(pid, "")
+            "personality": personality, "quote": final_quote
         }
-        
-        if is_ai:
-            ai_batch_data.append({
-                "id": pid, "personality": ranks[pid]["personality"],
-                "rank": rank_num, "cards": ranks[pid]["cards"]
-            })
-
-    # 3. 階段2：呼叫大語言模型，針對這回合的屬性與名次，一次性產生所有 AI 的對話
-    ai_quotes_dict = generate_battle_reactions(ai_batch_data, attr)
-    for pid in ranks:
-        if ranks[pid]["is_ai"]:
-            ranks[pid]["quote"] = ai_quotes_dict.get(pid, "勝敗乃兵家常事。")
 
     room.update({"last_attr": attr, "results": ranks, "status": "resolution_result"})
 
@@ -356,6 +332,7 @@ def render_lobby():
             except ValueError as e: st.error(e)
     st.divider()
     with st.expander("📡 系統與 API 連線診斷 (開發者工具)"):
+        st.write("目前架構：極致省流版 (每場遊戲僅消耗 1 次 API，完美利用高 TPM 額度)")
         if st.button("🔌 測試 API 動態路由", type="secondary"):
             with st.spinner("正在尋找可用之 Gemini API..."):
                 is_ok, msg = check_api_status()
@@ -378,7 +355,12 @@ def render_room():
             taken = f in room["players"].values() or f in room["ai_factions"]
             if cols[i].button(f"{f}" + (" (已選)" if taken else ""), disabled=taken):
                 assign_faction(code, pid, f); st.rerun()
-        if st.button("🚀 開始遊戲", type="primary"): start_game(code); st.rerun()
+        
+        # ✨ 將 Spinner 移至大廳，開始遊戲時生成全局劇本
+        if st.button("🚀 開始遊戲", type="primary"): 
+            with st.spinner("🔮 軍師正在推演天下大局 (正在產生全場 AI 專屬劇本，請稍候)..."):
+                start_game(code)
+            st.rerun()
 
     elif room["status"] == "playing":
         if pid in room["locked_cards"]: 
@@ -393,19 +375,17 @@ def render_room():
             if len(sel_idx) == 3:
                 selected_names = df.iloc[sel_idx]["名"].tolist()
                 st.success(f"⚔️ 已選定出戰：{', '.join(selected_names)}")
+                # 閃電結算，不再有任何 API 延遲
                 if st.button("🔐 鎖定出戰", type="primary"):
-                    with st.spinner("傳令兵正在通知其他陣營佈陣..."): 
-                        lock_cards(code, pid, selected_names)
+                    lock_cards(code, pid, selected_names)
                     st.rerun()
             elif len(sel_idx) > 3: st.error(f"⚠️ 只能選擇 3 名武將！您目前選擇了 {len(sel_idx)} 名。")
             else: st.warning(f"請在上方表格精確勾選 3 位武將 (目前 {len(sel_idx)}/3)")
 
     elif room["status"] == "resolution_pending":
         st.success("各路諸侯皆已佈陣完畢！")
-        # 🎯 核心改動：將 AI 台詞生成移到這裡，與擲骰子同步發生
-        if st.button("🎲 擲骰子並由 AI 生成戰場實況", type="primary", use_container_width=True):
-            with st.spinner("⚔️ 兩軍交鋒中... 正在根據比拼屬性與名次，為 AI 生成專屬戰後台詞..."):
-                resolve_round(code)
+        if st.button("🎲 擲骰子並揭曉戰場實況", type="primary", use_container_width=True):
+            resolve_round(code)
             st.rerun()
 
     elif room["status"] == "resolution_result":
